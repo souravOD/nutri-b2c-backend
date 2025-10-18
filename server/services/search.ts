@@ -65,6 +65,9 @@ export async function searchRecipes(params: SearchParams): Promise<SearchResult[
         where r.status = 'published'
           and r.market_country = 'US'
           and recipe_is_safe_for_profile(r, (select diets from prefs), (select allergens from prefs), '{}'::text[], (select conditions from prefs))
+          and (coalesce(cardinality($19::text[]),0)=0 or r.diet_tags  @> $19::text[]) -- AND logic for diets
+          and (coalesce(cardinality($20::text[]),0)=0 or NOT (r.allergens && $20::text[]))     -- Exclude recipes with any selected allergen
+          and (coalesce(cardinality($21::text[]),0)=0 or r.major_conditions @> $21::text[])    -- AND logic for conditions
           and ($5::text is null
                or r.tsv @@ plainto_tsquery('english', $5)
                or r.title ilike '%'||$5||'%')
@@ -122,6 +125,9 @@ export async function searchRecipes(params: SearchParams): Promise<SearchResult[
         cuisines,
         limit,
         offset,
+        diets,
+        allergensExclude,
+        majorConditions,
       ]
     );
 
