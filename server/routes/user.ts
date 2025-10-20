@@ -395,6 +395,15 @@ router.get("/history", authMiddleware, rateLimitMiddleware, async (req, res, nex
   }
 });
 
+router.delete("/history", authMiddleware, rateLimitMiddleware, async (req, res, next) => {
+  try {
+    await executeRaw("DELETE FROM recipe_history WHERE user_id = $1", [getUserId(req)]);
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get("/recently-viewed", authMiddleware, rateLimitMiddleware, async (req, res, next) => {
   try {
     const limit = req.query.limit ? parseInt(req.query.limit as string) : 20;
