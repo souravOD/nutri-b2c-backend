@@ -50,6 +50,14 @@ Base path: `/api/v1`
   - daily log, item CRUD, water, copy-day, history, streak, templates, from-cooking
 - `/meal-plans`
   - generate/list/detail/activate/swap/regenerate/delete/log-meal
+- `/grocery-lists`
+  - generate/list/detail
+  - list lifecycle status update (`active` <-> `purchased`)
+  - item update/add/delete/substitutions
+- `/budget`
+  - snapshot (`weekly|monthly`)
+  - create/update active grocery budget (USD)
+  - trends and recommendations
 - `/households`
   - household members list/add/read/update + member health update
 - `/admin`
@@ -72,6 +80,8 @@ Apply these against the same database referenced by `DATABASE_URL`:
 - `migrations/008_meal_logging_tables.sql`
 - `migrations/009_meal_plan_ai_columns.sql`
 - `migrations/010_recipe_source_type_backfill.sql`
+- `migrations/011_grocery_list_hardening.sql`
+- `migrations/012_budget_tracker_foundation.sql`
 
 Important:
 

@@ -22,3 +22,15 @@ psql "$DATABASE_URL" -f nutrition-backend-b2c/migrations/009_meal_plan_ai_column
 ```
 
 After running the migration, restart the backend if it is already running.
+
+## Required for Smart Grocery List (PRD-05)
+
+- **`011_grocery_list_hardening.sql`** — Adds `updated_at` support, list/item constraints, active-list uniqueness per meal plan, and performance indexes for grocery list reads and updates.
+
+## Required for Budget Tracker (PRD-06)
+
+- **`012_budget_tracker_foundation.sql`** — Adds household timezone support, purchase timestamp semantics (`shopping_list_items.purchased_at`), and budget-table hardening (`updated_at`, date-range check, and active budget uniqueness).
+
+## Required for Nutrition Dashboard (PRD-07)
+
+- **`013_nutrition_dashboard_foundation.sql`** - Adds weight history tracking (`b2c_customer_weight_history` + profile trigger + initial backfill) and per-item nutrient snapshots (`meal_log_item_nutrients`) used by dashboard analytics.

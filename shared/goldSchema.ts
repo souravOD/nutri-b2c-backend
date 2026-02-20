@@ -22,6 +22,7 @@ export const households = gold.table("households", {
   primaryAccountEmail: varchar("primary_account_email", { length: 255 }).notNull(),
   householdType: varchar("household_type", { length: 20 }).default("individual"),
   totalMembers: integer("total_members").default(1),
+  timezone: varchar("timezone", { length: 64 }).default("UTC").notNull(),
   locationCountry: varchar("location_country", { length: 100 }),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
@@ -73,6 +74,16 @@ export const b2cCustomerHealthProfiles = gold.table("b2c_customer_health_profile
   silverHealthProfileId: uuid("silver_health_profile_id"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const b2cCustomerWeightHistory = gold.table("b2c_customer_weight_history", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  b2cCustomerId: uuid("b2c_customer_id").notNull(),
+  weightKg: numeric("weight_kg", { precision: 5, scale: 2 }).notNull(),
+  recordedAt: timestamp("recorded_at").notNull().defaultNow(),
+  source: varchar("source", { length: 30 }).default("profile_update").notNull(),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
 export const b2cCustomerAllergens = gold.table("b2c_customer_allergens", {
@@ -268,10 +279,20 @@ export const healthConditionNutrientThresholds = gold.table(
 
 export const nutritionDefinitions = gold.table("nutrition_definitions", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
-  nutrientName: varchar("nutrient_name", { length: 255 }).notNull(),
-  nutrientCode: varchar("nutrient_code", { length: 100 }),
+  nutrientName: varchar("nutrient_name", { length: 100 }).notNull(),
+  nutrientCode: varchar("nutrient_code", { length: 20 }),
   usdaNutrientId: integer("usda_nutrient_id"),
-  unitName: varchar("unit_name", { length: 50 }),
+  usdaNutrientNumber: varchar("usda_nutrient_number", { length: 10 }),
+  spoonacularName: varchar("spoonacular_name", { length: 100 }),
+  category: varchar("category", { length: 50 }),
+  subcategory: varchar("subcategory", { length: 50 }),
+  unitName: varchar("unit_name", { length: 20 }).notNull(),
+  recommendedDailyValue: numeric("recommended_daily_value", { precision: 10, scale: 2 }),
+  rdvUnit: varchar("rdv_unit", { length: 20 }),
+  description: text("description"),
+  isMandatoryFda: boolean("is_mandatory_fda").default(false),
+  isEssential: boolean("is_essential").default(false),
+  rank: integer("rank"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });
@@ -372,6 +393,28 @@ export const products = gold.table("products", {
 });
 
 // ── Product Allergens (maps existing gold.product_allergens) ────────────────
+export const productCategories = gold.table("product_categories", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  name: varchar("name", { length: 255 }).notNull(),
+  slug: varchar("slug", { length: 100 }),
+  parentCategoryId: uuid("parent_category_id"),
+  description: text("description"),
+  level: integer("level").default(1),
+  path: text("path").array(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const productSubstitutions = gold.table("product_substitutions", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  originalProductId: uuid("original_product_id").notNull(),
+  substituteProductId: uuid("substitute_product_id").notNull(),
+  substitutionReason: varchar("substitution_reason", { length: 30 }),
+  dietaryCompatibility: text("dietary_compatibility").array(),
+  priceDifference: numeric("price_difference", { precision: 10, scale: 2 }),
+  confidenceScore: numeric("confidence_score", { precision: 3, scale: 2 }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
 export const productAllergens = gold.table("product_allergens", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
   productId: uuid("product_id").notNull(),
@@ -497,6 +540,16 @@ export const mealLogItems = gold.table("meal_log_items", {
   imageUrl: varchar("image_url", { length: 1000 }),
 });
 
+export const mealLogItemNutrients = gold.table("meal_log_item_nutrients", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  mealLogItemId: uuid("meal_log_item_id").notNull(),
+  nutrientId: uuid("nutrient_id").notNull(),
+  amount: numeric("amount", { precision: 12, scale: 4 }).notNull(),
+  unit: varchar("unit", { length: 20 }).notNull(),
+  source: varchar("source", { length: 30 }).default("derived").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
 export const mealLogStreaks = gold.table("meal_log_streaks", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
   b2cCustomerId: uuid("b2c_customer_id").notNull(),
@@ -575,6 +628,39 @@ export const recipeRatings = gold.table("recipe_ratings", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
+export const shoppingLists = gold.table("shopping_lists", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  householdId: uuid("household_id"),
+  b2cCustomerId: uuid("b2c_customer_id"),
+  b2bCustomerId: uuid("b2b_customer_id"),
+  mealPlanId: uuid("meal_plan_id"),
+  listName: varchar("list_name", { length: 255 }),
+  vendorId: uuid("vendor_id"),
+  totalEstimatedCost: numeric("total_estimated_cost", { precision: 10, scale: 2 }),
+  status: varchar("status", { length: 20 }).default("draft"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const shoppingListItems = gold.table("shopping_list_items", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  shoppingListId: uuid("shopping_list_id").notNull(),
+  productId: uuid("product_id"),
+  ingredientId: uuid("ingredient_id"),
+  itemName: varchar("item_name", { length: 255 }).notNull(),
+  quantity: numeric("quantity", { precision: 10, scale: 2 }).notNull(),
+  unit: varchar("unit", { length: 50 }),
+  category: varchar("category", { length: 100 }),
+  estimatedPrice: numeric("estimated_price", { precision: 10, scale: 2 }),
+  actualPrice: numeric("actual_price", { precision: 10, scale: 2 }),
+  isPurchased: boolean("is_purchased").default(false),
+  purchasedAt: timestamp("purchased_at"),
+  substitutedProductId: uuid("substituted_product_id"),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
 export const householdBudgets = gold.table("household_budgets", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
   householdId: uuid("household_id").notNull(),
@@ -586,6 +672,7 @@ export const householdBudgets = gold.table("household_budgets", {
   endDate: date("end_date"),
   isActive: boolean("is_active").default(true),
   createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
 // ── Zod Schemas ─────────────────────────────────────────────────────────────
@@ -606,19 +693,25 @@ export const insertB2cCustomerSchema = createInsertSchema(b2cCustomers).omit({
 
 export type B2cCustomer = typeof b2cCustomers.$inferSelect;
 export type B2cHealthProfile = typeof b2cCustomerHealthProfiles.$inferSelect;
+export type B2cCustomerWeightHistory = typeof b2cCustomerWeightHistory.$inferSelect;
 export type Recipe = typeof recipes.$inferSelect;
 export type InsertRecipe = z.infer<typeof insertRecipeSchema>;
 export type CustomerProductInteraction = typeof customerProductInteractions.$inferSelect;
 export type GoldProduct = typeof products.$inferSelect;
+export type ProductCategory = typeof productCategories.$inferSelect;
+export type ProductSubstitution = typeof productSubstitutions.$inferSelect;
 export type ProductAllergen = typeof productAllergens.$inferSelect;
 export type ScanHistoryRecord = typeof scanHistory.$inferSelect;
 export type RecipeNutritionProfile = typeof recipeNutritionProfiles.$inferSelect;
 export type MealLog = typeof mealLogs.$inferSelect;
 export type MealLogItem = typeof mealLogItems.$inferSelect;
+export type MealLogItemNutrient = typeof mealLogItemNutrients.$inferSelect;
 export type MealLogStreak = typeof mealLogStreaks.$inferSelect;
 export type MealLogTemplate = typeof mealLogTemplates.$inferSelect;
 export type MealPlan = typeof mealPlans.$inferSelect;
 export type MealPlanItem = typeof mealPlanItems.$inferSelect;
 export type RecipeRating = typeof recipeRatings.$inferSelect;
+export type ShoppingList = typeof shoppingLists.$inferSelect;
+export type ShoppingListItem = typeof shoppingListItems.$inferSelect;
 export type HouseholdBudget = typeof householdBudgets.$inferSelect;
 

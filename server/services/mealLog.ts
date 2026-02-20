@@ -11,11 +11,13 @@ import {
   b2cCustomerHealthProfiles,
   recipes,
 } from "../../shared/goldSchema.js";
+import { resolveMemberScope } from "./memberScope.js";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
 export interface AddItemInput {
   date: string;
+  memberId?: string;
   mealType: "breakfast" | "lunch" | "dinner" | "snack";
   recipeId?: string;
   productId?: string;
@@ -41,6 +43,7 @@ export interface AddItemInput {
 
 export interface CookingLogInput {
   recipeId: string;
+  memberId?: string;
   servings: number;
   mealType?: "breakfast" | "lunch" | "dinner" | "snack";
   cookingStartedAt: string;
@@ -128,7 +131,11 @@ export async function getNutritionForProduct(
 
 // ── Daily Log CRUD ──────────────────────────────────────────────────────────
 
-export async function getOrCreateDailyLog(b2cCustomerId: string, date: string) {
+export async function getOrCreateDailyLog(
+  b2cCustomerId: string,
+  date: string,
+  householdIdOverride?: string
+) {
   const existing = await db
     .select()
     .from(mealLogs)
@@ -158,7 +165,7 @@ export async function getOrCreateDailyLog(b2cCustomerId: string, date: string) {
     .insert(mealLogs)
     .values({
       b2cCustomerId,
-      householdId: customer[0]?.householdId ?? null,
+      householdId: householdIdOverride ?? customer[0]?.householdId ?? null,
       logDate: date,
       calorieGoal: healthProfile[0]?.targetCalories ?? null,
     })
@@ -167,14 +174,21 @@ export async function getOrCreateDailyLog(b2cCustomerId: string, date: string) {
   return inserted[0];
 }
 
-export async function getDailyLog(b2cCustomerId: string, date: string) {
+export async function getDailyLog(
+  actorB2cCustomerId: string,
+  date: string,
+  memberId?: string
+) {
+  const scope = await resolveMemberScope(actorB2cCustomerId, memberId);
+  const targetMemberId = scope.targetMemberId;
+
   // Read-only: never creates a row. Returns log: null when no data exists for this date.
   const existing = await db
     .select()
     .from(mealLogs)
     .where(
       and(
-        eq(mealLogs.b2cCustomerId, b2cCustomerId),
+        eq(mealLogs.b2cCustomerId, targetMemberId),
         eq(mealLogs.logDate, date)
       )
     )
@@ -233,7 +247,7 @@ export async function getDailyLog(b2cCustomerId: string, date: string) {
   const healthProfile = await db
     .select()
     .from(b2cCustomerHealthProfiles)
-    .where(eq(b2cCustomerHealthProfiles.b2cCustomerId, b2cCustomerId))
+    .where(eq(b2cCustomerHealthProfiles.b2cCustomerId, targetMemberId))
     .limit(1);
 
   const targets = healthProfile[0]
@@ -248,15 +262,17 @@ export async function getDailyLog(b2cCustomerId: string, date: string) {
       }
     : null;
 
-  const streak = await getStreak(b2cCustomerId);
+  const streak = await getStreak(actorB2cCustomerId, targetMemberId);
 
   return { log, items: hydratedItems, targets, streak };
 }
 
 // ── Add / Update / Delete Items ─────────────────────────────────────────────
 
-export async function addMealItem(b2cCustomerId: string, input: AddItemInput) {
-  const log = await getOrCreateDailyLog(b2cCustomerId, input.date);
+export async function addMealItem(actorB2cCustomerId: string, input: AddItemInput) {
+  const scope = await resolveMemberScope(actorB2cCustomerId, input.memberId);
+  const targetMemberId = scope.targetMemberId;
+  const log = await getOrCreateDailyLog(targetMemberId, input.date, scope.householdId);
 
   let nutrition: NutritionSnapshot;
   let source = input.source ?? "manual";
@@ -310,36 +326,60 @@ export async function addMealItem(b2cCustomerId: string, input: AddItemInput) {
     .returning();
 
   const updatedTotals = await recalculateDailyTotals(log.id);
-  await updateStreak(b2cCustomerId, input.date);
+  await updateStreak(targetMemberId, input.date);
 
   return { item: inserted[0], updatedTotals };
 }
 
-export async function updateMealItem(
-  itemId: string,
-  b2cCustomerId: string,
-  updates: { servings?: number; mealType?: string; notes?: string }
-) {
-  const item = await db
-    .select()
-    .from(mealLogItems)
-    .where(eq(mealLogItems.id, itemId))
-    .limit(1);
+async function getItemWithLogContext(itemId: string): Promise<{
+  item: any;
+  logB2cCustomerId: string;
+  logHouseholdId: string | null;
+  mealLogId: string;
+}> {
+  const rows = (await executeRaw(
+    `SELECT
+       mli.*,
+       ml.b2c_customer_id AS log_b2c_customer_id,
+       ml.household_id AS log_household_id
+     FROM gold.meal_log_items mli
+     JOIN gold.meal_logs ml ON ml.id = mli.meal_log_id
+     WHERE mli.id = $1
+     LIMIT 1`,
+    [itemId]
+  )) as any[];
 
-  if (!item[0]) {
+  const row = rows[0];
+  if (!row) {
     const err = new Error("Meal log item not found");
     (err as any).status = 404;
     throw err;
   }
 
-  const logRow = await db
-    .select({ b2cCustomerId: mealLogs.b2cCustomerId })
-    .from(mealLogs)
-    .where(eq(mealLogs.id, item[0].mealLogId))
-    .limit(1);
+  return {
+    item: row,
+    logB2cCustomerId: row.log_b2c_customer_id,
+    logHouseholdId: row.log_household_id,
+    mealLogId: row.meal_log_id,
+  };
+}
 
-  if (logRow[0]?.b2cCustomerId !== b2cCustomerId) {
+export async function updateMealItem(
+  itemId: string,
+  actorB2cCustomerId: string,
+  updates: { servings?: number; mealType?: string; notes?: string },
+  memberId?: string
+) {
+  const scope = await resolveMemberScope(actorB2cCustomerId, memberId);
+  const ctx = await getItemWithLogContext(itemId);
+
+  if (!ctx.logHouseholdId || ctx.logHouseholdId !== scope.householdId) {
     const err = new Error("Not authorized to update this item");
+    (err as any).status = 403;
+    throw err;
+  }
+  if (memberId && ctx.logB2cCustomerId !== scope.targetMemberId) {
+    const err = new Error("Item does not belong to the selected member");
     (err as any).status = 403;
     throw err;
   }
@@ -348,22 +388,22 @@ export async function updateMealItem(
   if (updates.mealType) setValues.mealType = updates.mealType;
   if (updates.notes !== undefined) setValues.notes = updates.notes;
 
-  if (updates.servings != null && updates.servings !== n(item[0].servings)) {
-    const oldServings = n(item[0].servings) || 1;
+  if (updates.servings != null && updates.servings !== n(ctx.item.servings)) {
+    const oldServings = n(ctx.item.servings) || 1;
     const ratio = updates.servings / oldServings;
     setValues.servings = String(updates.servings);
-    setValues.calories = Math.round(n(item[0].calories) * ratio);
-    setValues.proteinG = String(Math.round(n(item[0].proteinG) * ratio * 100) / 100);
-    setValues.carbsG = String(Math.round(n(item[0].carbsG) * ratio * 100) / 100);
-    setValues.fatG = String(Math.round(n(item[0].fatG) * ratio * 100) / 100);
-    setValues.fiberG = String(Math.round(n(item[0].fiberG) * ratio * 100) / 100);
-    setValues.sugarG = String(Math.round(n(item[0].sugarG) * ratio * 100) / 100);
-    setValues.sodiumMg = Math.round(n(item[0].sodiumMg) * ratio);
-    setValues.saturatedFatG = String(Math.round(n(item[0].saturatedFatG) * ratio * 100) / 100);
+    setValues.calories = Math.round(n(ctx.item.calories) * ratio);
+    setValues.proteinG = String(Math.round(n(ctx.item.protein_g) * ratio * 100) / 100);
+    setValues.carbsG = String(Math.round(n(ctx.item.carbs_g) * ratio * 100) / 100);
+    setValues.fatG = String(Math.round(n(ctx.item.fat_g) * ratio * 100) / 100);
+    setValues.fiberG = String(Math.round(n(ctx.item.fiber_g) * ratio * 100) / 100);
+    setValues.sugarG = String(Math.round(n(ctx.item.sugar_g) * ratio * 100) / 100);
+    setValues.sodiumMg = Math.round(n(ctx.item.sodium_mg) * ratio);
+    setValues.saturatedFatG = String(Math.round(n(ctx.item.saturated_fat_g) * ratio * 100) / 100);
   }
 
   if (Object.keys(setValues).length === 0) {
-    return { item: item[0], updatedTotals: null };
+    return { item: ctx.item, updatedTotals: null };
   }
 
   const updated = await db
@@ -372,38 +412,32 @@ export async function updateMealItem(
     .where(eq(mealLogItems.id, itemId))
     .returning();
 
-  const updatedTotals = await recalculateDailyTotals(item[0].mealLogId);
+  const updatedTotals = await recalculateDailyTotals(ctx.mealLogId);
   return { item: updated[0], updatedTotals };
 }
 
-export async function deleteMealItem(itemId: string, b2cCustomerId: string) {
-  const item = await db
-    .select()
-    .from(mealLogItems)
-    .where(eq(mealLogItems.id, itemId))
-    .limit(1);
+export async function deleteMealItem(
+  itemId: string,
+  actorB2cCustomerId: string,
+  memberId?: string
+) {
+  const scope = await resolveMemberScope(actorB2cCustomerId, memberId);
+  const ctx = await getItemWithLogContext(itemId);
 
-  if (!item[0]) {
-    const err = new Error("Meal log item not found");
-    (err as any).status = 404;
+  if (!ctx.logHouseholdId || ctx.logHouseholdId !== scope.householdId) {
+    const err = new Error("Not authorized to delete this item");
+    (err as any).status = 403;
     throw err;
   }
-
-  const logRow = await db
-    .select({ b2cCustomerId: mealLogs.b2cCustomerId })
-    .from(mealLogs)
-    .where(eq(mealLogs.id, item[0].mealLogId))
-    .limit(1);
-
-  if (logRow[0]?.b2cCustomerId !== b2cCustomerId) {
-    const err = new Error("Not authorized to delete this item");
+  if (memberId && ctx.logB2cCustomerId !== scope.targetMemberId) {
+    const err = new Error("Item does not belong to the selected member");
     (err as any).status = 403;
     throw err;
   }
 
   await db.delete(mealLogItems).where(eq(mealLogItems.id, itemId));
 
-  const updatedTotals = await recalculateDailyTotals(item[0].mealLogId);
+  const updatedTotals = await recalculateDailyTotals(ctx.mealLogId);
   return { success: true, updatedTotals };
 }
 
@@ -459,11 +493,13 @@ export async function recalculateDailyTotals(logId: string) {
 // ── Water Tracking ──────────────────────────────────────────────────────────
 
 export async function updateWaterIntake(
-  b2cCustomerId: string,
+  actorB2cCustomerId: string,
   date: string,
-  amountMl: number
+  amountMl: number,
+  memberId?: string
 ) {
-  const log = await getOrCreateDailyLog(b2cCustomerId, date);
+  const scope = await resolveMemberScope(actorB2cCustomerId, memberId);
+  const log = await getOrCreateDailyLog(scope.targetMemberId, date, scope.householdId);
 
   const newTotal = Math.max(0, (log.waterMl ?? 0) + amountMl);
   const updated = await db
@@ -481,16 +517,20 @@ export async function updateWaterIntake(
 // ── Copy Day ────────────────────────────────────────────────────────────────
 
 export async function copyDay(
-  b2cCustomerId: string,
+  actorB2cCustomerId: string,
   sourceDate: string,
-  targetDate: string
+  targetDate: string,
+  memberId?: string
 ) {
+  const scope = await resolveMemberScope(actorB2cCustomerId, memberId);
+  const targetMemberId = scope.targetMemberId;
+
   const sourceLog = await db
     .select()
     .from(mealLogs)
     .where(
       and(
-        eq(mealLogs.b2cCustomerId, b2cCustomerId),
+        eq(mealLogs.b2cCustomerId, targetMemberId),
         eq(mealLogs.logDate, sourceDate)
       )
     )
@@ -511,7 +551,7 @@ export async function copyDay(
     return { items: [] };
   }
 
-  const targetLog = await getOrCreateDailyLog(b2cCustomerId, targetDate);
+  const targetLog = await getOrCreateDailyLog(targetMemberId, targetDate, scope.householdId);
 
   const newItems = sourceItems.map((item) => ({
     mealLogId: targetLog.id,
@@ -538,7 +578,7 @@ export async function copyDay(
 
   const inserted = await db.insert(mealLogItems).values(newItems).returning();
   await recalculateDailyTotals(targetLog.id);
-  await updateStreak(b2cCustomerId, targetDate);
+  await updateStreak(targetMemberId, targetDate);
 
   return { items: inserted };
 }
@@ -546,10 +586,13 @@ export async function copyDay(
 // ── History / Trends ────────────────────────────────────────────────────────
 
 export async function getHistory(
-  b2cCustomerId: string,
+  actorB2cCustomerId: string,
   startDate: string,
-  endDate: string
+  endDate: string,
+  memberId?: string
 ) {
+  const scope = await resolveMemberScope(actorB2cCustomerId, memberId);
+
   const rows = await executeRaw(
     `SELECT
        log_date                       AS date,
@@ -563,7 +606,7 @@ export async function getHistory(
      WHERE b2c_customer_id = $1
        AND log_date BETWEEN $2 AND $3
      ORDER BY log_date`,
-    [b2cCustomerId, startDate, endDate]
+    [scope.targetMemberId, startDate, endDate]
   );
 
   const days = rows as any[];
@@ -578,7 +621,7 @@ export async function getHistory(
      WHERE b2c_customer_id = $1
        AND log_date BETWEEN $2 AND $3
        AND total_calories > 0`,
-    [b2cCustomerId, startDate, endDate]
+    [scope.targetMemberId, startDate, endDate]
   );
 
   const averages = (avgRows as any[])[0] ?? {};
@@ -588,11 +631,16 @@ export async function getHistory(
 
 // ── Streak ──────────────────────────────────────────────────────────────────
 
-export async function getStreak(b2cCustomerId: string) {
+export async function getStreak(
+  actorB2cCustomerId: string,
+  memberId?: string
+) {
+  const scope = await resolveMemberScope(actorB2cCustomerId, memberId);
+
   const rows = await db
     .select()
     .from(mealLogStreaks)
-    .where(eq(mealLogStreaks.b2cCustomerId, b2cCustomerId))
+    .where(eq(mealLogStreaks.b2cCustomerId, scope.targetMemberId))
     .limit(1);
 
   return rows[0] ?? { currentStreak: 0, longestStreak: 0, totalDaysLogged: 0, lastLoggedDate: null };
@@ -654,15 +702,17 @@ export async function updateStreak(b2cCustomerId: string, dateStr: string) {
 // ── Cooking Integration ─────────────────────────────────────────────────────
 
 export async function logFromCooking(
-  b2cCustomerId: string,
+  actorB2cCustomerId: string,
   input: CookingLogInput
 ) {
+  const scope = await resolveMemberScope(actorB2cCustomerId, input.memberId);
+  const targetMemberId = scope.targetMemberId;
   const todayStr = new Date().toISOString().slice(0, 10);
   const mealType = input.mealType ?? inferMealType();
 
   const nutrition = await getNutritionForRecipe(input.recipeId, input.servings);
 
-  const log = await getOrCreateDailyLog(b2cCustomerId, todayStr);
+  const log = await getOrCreateDailyLog(targetMemberId, todayStr, scope.householdId);
 
   const inserted = await db
     .insert(mealLogItems)
@@ -687,29 +737,31 @@ export async function logFromCooking(
     .returning();
 
   await recalculateDailyTotals(log.id);
-  await updateStreak(b2cCustomerId, todayStr);
+  await updateStreak(targetMemberId, todayStr);
 
   return { item: inserted[0] };
 }
 
 // ── Templates ───────────────────────────────────────────────────────────────
 
-export async function getTemplates(b2cCustomerId: string) {
+export async function getTemplates(actorB2cCustomerId: string, memberId?: string) {
+  const scope = await resolveMemberScope(actorB2cCustomerId, memberId);
   return db
     .select()
     .from(mealLogTemplates)
-    .where(eq(mealLogTemplates.b2cCustomerId, b2cCustomerId))
+    .where(eq(mealLogTemplates.b2cCustomerId, scope.targetMemberId))
     .orderBy(desc(mealLogTemplates.useCount));
 }
 
 export async function createTemplate(
-  b2cCustomerId: string,
-  data: { name: string; mealType?: string; items: any[] }
+  actorB2cCustomerId: string,
+  data: { name: string; mealType?: string; items: any[]; memberId?: string }
 ) {
+  const scope = await resolveMemberScope(actorB2cCustomerId, data.memberId);
   const inserted = await db
     .insert(mealLogTemplates)
     .values({
-      b2cCustomerId,
+      b2cCustomerId: scope.targetMemberId,
       templateName: data.name,
       mealType: data.mealType ?? null,
       items: data.items,

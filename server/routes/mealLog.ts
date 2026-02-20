@@ -96,8 +96,13 @@ const cookingLogSchema = z.object({
 
 const templateSchema = z.object({
   name: z.string().min(1).max(255),
+  memberId: z.string().uuid().optional(),
   mealType: mealTypeEnum.optional(),
   items: z.array(z.any()).min(1),
+});
+
+const memberQuerySchema = z.object({
+  memberId: z.string().uuid().optional(),
 });
 
 // ── Routes ──────────────────────────────────────────────────────────────────
@@ -115,7 +120,8 @@ router.get(
         throw new AppError(400, "Bad Request", "date must be YYYY-MM-DD");
       }
 
-      const result = await getDailyLog(customerId, date);
+      const { memberId } = memberQuerySchema.parse(req.query ?? {});
+      const result = await getDailyLog(customerId, date, memberId);
       res.json(result);
     } catch (err) {
       next(err);
@@ -147,7 +153,8 @@ router.put(
     try {
       const customerId = b2cId(req);
       const parsed = updateItemSchema.parse(req.body);
-      const result = await updateMealItem(req.params.id, customerId, parsed);
+      const { memberId } = memberQuerySchema.parse(req.query ?? {});
+      const result = await updateMealItem(req.params.id, customerId, parsed, memberId);
       res.json(result);
     } catch (err) {
       next(err);
@@ -162,7 +169,8 @@ router.delete(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const customerId = b2cId(req);
-      const result = await deleteMealItem(req.params.id, customerId);
+      const { memberId } = memberQuerySchema.parse(req.query ?? {});
+      const result = await deleteMealItem(req.params.id, customerId, memberId);
       res.json(result);
     } catch (err) {
       next(err);
@@ -178,7 +186,7 @@ router.post(
     try {
       const customerId = b2cId(req);
       const parsed = waterSchema.parse(req.body);
-      const result = await updateWaterIntake(customerId, parsed.date, parsed.amount_ml);
+      const result = await updateWaterIntake(customerId, parsed.date, parsed.amount_ml, parsed.memberId);
       res.json(result);
     } catch (err) {
       next(err);
@@ -194,7 +202,7 @@ router.post(
     try {
       const customerId = b2cId(req);
       const parsed = copyDaySchema.parse(req.body);
-      const result = await copyDay(customerId, parsed.sourceDate, parsed.targetDate);
+      const result = await copyDay(customerId, parsed.sourceDate, parsed.targetDate, parsed.memberId);
       res.json(result);
     } catch (err) {
       next(err);
@@ -216,7 +224,8 @@ router.get(
         throw new AppError(400, "Bad Request", "startDate and endDate must be YYYY-MM-DD");
       }
 
-      const result = await getHistory(customerId, startDate, endDate);
+      const { memberId } = memberQuerySchema.parse(req.query ?? {});
+      const result = await getHistory(customerId, startDate, endDate, memberId);
       res.json(result);
     } catch (err) {
       next(err);
@@ -231,7 +240,8 @@ router.get(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const customerId = b2cId(req);
-      const streak = await getStreak(customerId);
+      const { memberId } = memberQuerySchema.parse(req.query ?? {});
+      const streak = await getStreak(customerId, memberId);
       res.json(streak);
     } catch (err) {
       next(err);
@@ -262,7 +272,8 @@ router.get(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const customerId = b2cId(req);
-      const templates = await getTemplates(customerId);
+      const { memberId } = memberQuerySchema.parse(req.query ?? {});
+      const templates = await getTemplates(customerId, memberId);
       res.json({ templates });
     } catch (err) {
       next(err);

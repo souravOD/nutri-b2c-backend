@@ -12,12 +12,42 @@ const WEB_ORIGINS = (process.env.WEB_ORIGINS ?? "http://127.0.0.1:3000,http://lo
   .split(",")
   .map(s => s.trim())
   .filter(Boolean);
+const CORS_ALLOW_ALL = process.env.CORS_ALLOW_ALL === "1";
+
+const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const toOrigin = (value: string): string => {
+  try {
+    return new URL(value).origin;
+  } catch {
+    return value;
+  }
+};
+
+const exactOrigins = new Set<string>();
+const wildcardOriginMatchers: RegExp[] = [];
+
+for (const entry of WEB_ORIGINS) {
+  if (entry.includes("*")) {
+    // Allow wildcard patterns, e.g. https://nutri-b2c-frontend-*.vercel.app
+    const pattern = `^${escapeRegex(entry).replace(/\\\*/g, ".*")}$`;
+    wildcardOriginMatchers.push(new RegExp(pattern, "i"));
+    continue;
+  }
+  exactOrigins.add(toOrigin(entry));
+}
+
+const isOriginAllowed = (origin: string) => {
+  const normalizedOrigin = toOrigin(origin);
+  if (exactOrigins.has(normalizedOrigin)) return true;
+  return wildcardOriginMatchers.some((re) => re.test(normalizedOrigin));
+};
 
 // IMPORTANT: keep header names lowercase
 const corsOptions: cors.CorsOptions = {
   origin(origin, cb) {
     if (!origin) return cb(null, true);                 // allow server-to-server / curl
-    if (WEB_ORIGINS.includes(origin)) return cb(null, true);
+    if (CORS_ALLOW_ALL) return cb(null, true);
+    if (isOriginAllowed(origin)) return cb(null, true);
     return cb(new Error(`Origin ${origin} not allowed by CORS`));
   },
   methods: ["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
