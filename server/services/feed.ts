@@ -1,6 +1,5 @@
-import { db, executeRaw } from "../config/database.js";
-import { userProfiles, recipes } from "../../shared/schema.js";
-import { eq } from "drizzle-orm";
+import { executeRaw } from "../config/database.js";
+import { getRecipeAllergenMap, getRecipeNutritionMap } from "./recipeHydration.js";
 
 export interface FeedResult {
   recipe: any;
@@ -8,280 +7,224 @@ export interface FeedResult {
   reasons: string[];
 }
 
-type StrictPrefs = {
-  diets: string[];
-  allergens: string[];
-  cuisines: string[];
+type UserPrefs = {
+  dietIds: string[];
+  allergenIds: string[];
+  conditionIds: string[];
   dislikes: string[];
-  conditions: string[];
 };
 
-async function getStrictPrefs(userId: string): Promise<StrictPrefs> {
-  // Fetch profile prefs (always exists in schema)
-  const base = await executeRaw<Pick<StrictPrefs, 'diets' | 'allergens' | 'cuisines'>>(
+async function getUserPrefs(b2cCustomerId: string): Promise<UserPrefs> {
+  const rows = await executeRaw(
     `
     select
-      coalesce(profile_diets, '{}')      as diets,
-      coalesce(profile_allergens, '{}')  as allergens,
-      coalesce(preferred_cuisines, '{}') as cuisines
-    from user_profiles
-    where user_id = $1
-    limit 1
+      coalesce(array_remove(array_agg(distinct cdp.diet_id), null), '{}'::uuid[]) as diet_ids,
+      coalesce(array_remove(array_agg(distinct ca.allergen_id), null), '{}'::uuid[]) as allergen_ids,
+      coalesce(array_remove(array_agg(distinct chc.condition_id), null), '{}'::uuid[]) as condition_ids,
+      coalesce(hp.disliked_ingredients, '{}'::text[]) as dislikes
+    from gold.b2c_customers c
+    left join gold.b2c_customer_dietary_preferences cdp
+      on c.id = cdp.b2c_customer_id and cdp.is_active = true
+    left join gold.b2c_customer_allergens ca
+      on c.id = ca.b2c_customer_id and ca.is_active = true
+    left join gold.b2c_customer_health_conditions chc
+      on c.id = chc.b2c_customer_id and chc.is_active = true
+    left join gold.b2c_customer_health_profiles hp
+      on c.id = hp.b2c_customer_id
+    where c.id = $1
+    group by c.id, hp.disliked_ingredients
     `,
-    [userId]
+    [b2cCustomerId]
   );
 
-  const out: StrictPrefs = base[0] ?? { diets: [], allergens: [], cuisines: [], dislikes: [], conditions: [] };
-
-  // Try to fetch health profile; if table/columns don’t exist, default silently
-  try {
-    const hp = await executeRaw<Pick<StrictPrefs, 'dislikes' | 'conditions'>>(
-      `
-      select
-        coalesce(disliked_ingredients, '{}') as dislikes,
-        coalesce(major_conditions, '{}')     as conditions
-      from health_profiles
-      where user_id = $1
-      limit 1
-      `,
-      [userId]
-    );
-    if (hp[0]) {
-      out.dislikes = hp[0].dislikes ?? [];
-      out.conditions = hp[0].conditions ?? [];
-    }
-  } catch (_err) {
-    // health_profiles may not exist in some deployments; proceed with defaults
-    out.dislikes = out.dislikes ?? [];
-    out.conditions = out.conditions ?? [];
+  if (!rows.length) {
+    return { dietIds: [], allergenIds: [], conditionIds: [], dislikes: [] };
   }
 
-  return out;
+  const row = rows[0] as any;
+  return {
+    dietIds: row.diet_ids ?? [],
+    allergenIds: row.allergen_ids ?? [],
+    conditionIds: row.condition_ids ?? [],
+    dislikes: row.dislikes ?? [],
+  };
+}
+
+function mapFeedRecipe(row: any, nutritionMap: Map<string, any>, allergenMap: Map<string, any>) {
+  return {
+    id: row.id,
+    title: row.title,
+    description: row.description,
+    imageUrl: row.image_url,
+    sourceUrl: row.source_url,
+    cuisine: row.cuisine_id
+      ? { id: row.cuisine_id, code: row.cuisine_code, name: row.cuisine_name }
+      : null,
+    mealType: row.meal_type,
+    difficulty: row.difficulty,
+    prepTimeMinutes: row.prep_time_minutes,
+    cookTimeMinutes: row.cook_time_minutes,
+    totalTimeMinutes: row.total_time_minutes,
+    servings: row.servings,
+    nutrition: nutritionMap.get(row.id) ?? {},
+    allergens: allergenMap.get(row.id) ?? [],
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    createdByUserId: row.created_by_user_id,
+  };
 }
 
 export async function getPersonalizedFeed(
-  userId: string,
+  b2cCustomerId: string,
   limit: number = 200,
   offset: number = 0
 ): Promise<FeedResult[]> {
   try {
-    const prefs = await getStrictPrefs(userId);
-    // Pass 1: strict (diets any-of, allergens/dislikes hard, condition caps hard)
-    const strictRows = await executeRaw(
+    const prefs = await getUserPrefs(b2cCustomerId);
+    const dislikes = prefs.dislikes.map((d) => d.toLowerCase());
+
+    const rows = await executeRaw(
       `
-      with prefs as (
-        select
-          $1::text[] as diets,
-          $2::text[] as allergens,
-          $3::text[] as cuisines,
-          $4::text[] as dislikes,
-          $5::text[] as conditions
-      ),
-      candidates as (
-        select r.*
-        from recipes r, prefs p
-        where r.status = 'published'
-          and r.market_country = 'US'
-          and recipe_is_safe_for_profile(r, (select diets from prefs), (select allergens from prefs), (select dislikes from prefs), (select conditions from prefs))
-          and not exists (
-            select 1 from recipe_history rh
-            where rh.user_id = $8
-              and rh.recipe_id = r.id
-              and rh.event = 'viewed'
-              and rh.at > now() - interval '48 hours'
-          )
-      )
       select
-        to_jsonb(c.*) as recipe,
-        (
-          0.25 * public.cuisine_preference_score(c.cuisines, (select cuisines from prefs)) +
-          0.20 * public.macro_fit_score(c, $8) +
-          0.20 * public.recency_score(c.updated_at) +
-          0.20 * public.popularity_score(p.cooked_30d) +
-          0.15 * public.health_nudge_score(c) -
-          0.30 * public.recent_view_penalty(c.id, $8)
-        ) as score,
-        public.build_feed_reasons(c, (select diets from prefs), (select cuisines from prefs))
-          || public.build_health_reasons(c, (select allergens from prefs), (select conditions from prefs))
-          as reasons
-      from candidates c
+        r.*,
+        c.id as cuisine_id,
+        c.code as cuisine_code,
+        c.name as cuisine_name,
+        coalesce(p.saved_30d, 0) as saved_30d
+      from gold.recipes r
+      left join gold.cuisines c on c.id = r.cuisine_id
       left join lateral (
-        select count(*)::int as cooked_30d
-        from recipe_history rh
-        where rh.recipe_id = c.id
-          and rh.event = 'cooked'
-          and rh.at > now() - interval '30 days'
+        select count(*)::int as saved_30d
+        from gold.customer_product_interactions cpi
+        where cpi.recipe_id = r.id
+          and cpi.entity_type = 'recipe'
+          and cpi.interaction_type = 'saved'
+          and cpi.interaction_timestamp > now() - interval '30 days'
       ) p on true
-      order by score desc, c.updated_at desc, c.id asc
+      where (coalesce(cardinality($1::uuid[]),0)=0 or not exists (
+        select 1
+        from gold.recipe_ingredients ri
+        join gold.diet_ingredient_rules dir on dir.ingredient_id = ri.ingredient_id
+        where ri.recipe_id = r.id
+          and dir.diet_id = any($1)
+          and dir.rule_type = 'forbidden'
+      ))
+      and (coalesce(cardinality($2::uuid[]),0)=0 or not exists (
+        select 1
+        from gold.recipe_ingredients ri
+        join gold.ingredient_allergens ia on ia.ingredient_id = ri.ingredient_id
+        where ri.recipe_id = r.id
+          and ia.allergen_id = any($2)
+      ))
+      and (coalesce(cardinality($3::uuid[]),0)=0 or not exists (
+        select 1
+        from gold.recipe_ingredients ri
+        join gold.health_condition_ingredient_restrictions hcir on hcir.ingredient_id = ri.ingredient_id
+        where ri.recipe_id = r.id
+          and hcir.condition_id = any($3)
+          and hcir.restriction_type = 'forbidden'
+      ))
+      and (coalesce(cardinality($4::text[]),0)=0 or not exists (
+        select 1
+        from gold.recipe_ingredients ri
+        join gold.ingredients i on i.id = ri.ingredient_id
+        where ri.recipe_id = r.id
+          and lower(i.name) = any($4)
+      ))
+      and not exists (
+        select 1
+        from gold.customer_product_interactions cpi
+        where cpi.recipe_id = r.id
+          and cpi.entity_type = 'recipe'
+          and (cpi.interaction_type = 'viewed' or cpi.metadata->>'event' = 'viewed')
+          and cpi.interaction_timestamp > now() - interval '48 hours'
+          and cpi.b2c_customer_id = $5
+      )
+      order by saved_30d desc nulls last, r.updated_at desc, r.id asc
       limit $6 offset $7
       `,
       [
-        prefs.diets,
-        prefs.allergens,
-        prefs.cuisines,
-        prefs.dislikes,
-        prefs.conditions,
+        prefs.dietIds,
+        prefs.allergenIds,
+        prefs.conditionIds,
+        dislikes,
+        b2cCustomerId,
         limit,
         offset,
-        userId,
       ]
     );
-    const strict = strictRows.map((row: any) => ({
-      recipe: row.recipe,
-      score: Number(row.score ?? 0),
-      reasons: Array.isArray(row.reasons) ? row.reasons : [],
-    }));
 
-    if (strict.length >= limit) return strict;
+    const ids = rows.map((r: any) => r.id);
+    const nutritionMap = await getRecipeNutritionMap(ids);
+    const allergenMap = await getRecipeAllergenMap(ids);
 
-    // Pass 2: balanced (only allergens/dislikes hard; conditions become soft via reasons; diets used for scoring only)
-    const excludeIds = strict.map((r) => r.recipe.id);
-    const balancedRows = await executeRaw(
-      `
-      with prefs as (
-        select
-          $1::text[] as diets,
-          $2::text[] as allergens,
-          $3::text[] as cuisines,
-          $4::text[] as dislikes
-      )
-      select
-        to_jsonb(r.*) as recipe,
-        (
-          0.20 * public.diet_match_score(r.diet_tags, (select diets from prefs)) +
-          0.25 * public.cuisine_preference_score(r.cuisines, (select cuisines from prefs)) +
-          0.15 * public.macro_fit_score(r, $7) +
-          0.20 * public.recency_score(r.updated_at) +
-          0.20 * public.popularity_score(p.cooked_30d)
-        ) as score,
-        public.build_feed_reasons(r, (select diets from prefs), (select cuisines from prefs)) as reasons
-      from recipes r
-      left join lateral (
-        select count(*)::int as cooked_30d
-        from recipe_history rh
-        where rh.recipe_id = r.id
-          and rh.event = 'cooked'
-          and rh.at > now() - interval '30 days'
-      ) p on true
-      where r.status='published' and r.market_country='US'
-        and recipe_is_safe_for_profile(r, (select diets from prefs), (select allergens from prefs), (select dislikes from prefs), '{}'::text[])
-        and ($6::uuid[] is null or not (r.id = any($6::uuid[])))
-      order by score desc, r.updated_at desc, r.id asc
-      limit $5
-      `,
-      [
-        prefs.diets,
-        prefs.allergens,
-        prefs.cuisines,
-        prefs.dislikes,
-        Math.max(limit * 2, 400), // overfetch to cover dedupe
-        excludeIds.length ? excludeIds : null,
-        userId,
-      ]
-    );
-    const balanced = balancedRows
-      .map((row: any) => ({ recipe: row.recipe, score: Number(row.score ?? 0), reasons: row.reasons ?? [] }))
-      .filter((r: any) => !excludeIds.includes(r.recipe.id));
-
-    const combined = [...strict, ...balanced].slice(0, limit);
-    if (combined.length >= limit) return combined;
-
-    // Pass 3: popularity fallback (allergens/dislikes hard only), exclude already chosen
-    const exclude2 = combined.map((r) => r.recipe.id);
-    const remaining = limit - combined.length;
-    const fallbackRows = await executeRaw(
-      `
-      select to_jsonb(r.*) as recipe,
-             coalesce(mv.cooked_30d,0) * 1.0 as score,
-             ARRAY['Popular this month']::text[] as reasons
-      from recipes r
-      left join lateral (
-        select count(*)::int as cooked_30d
-        from recipe_history rh
-        where rh.recipe_id = r.id
-          and rh.event = 'cooked'
-          and rh.at > now() - interval '30 days'
-      ) mv on true
-      where r.status='published' and r.market_country='US'
-        and recipe_is_safe_for_profile(r, $1::text[], $2::text[], '{}'::text[], '{}'::text[])
-        and ($3::uuid[] is null or not (r.id = any($3::uuid[])))
-      order by mv.cooked_30d desc nulls last, r.updated_at desc, r.id asc
-      limit $4
-      `,
-      [prefs.diets, prefs.allergens, exclude2.length ? exclude2 : null, Math.max(remaining * 2, remaining)]
-    );
-    const fallback = fallbackRows
-      .map((row: any) => ({ recipe: row.recipe, score: Number(row.score ?? 0), reasons: row.reasons ?? [] }))
-      .filter((r: any) => !exclude2.includes(r.recipe.id));
-
-    return [...combined, ...fallback].slice(0, limit);
+    return rows.map((row: any) => {
+      const updatedAt = row.updated_at ? new Date(row.updated_at).getTime() : Date.now();
+      const daysOld = Math.max(0, (Date.now() - updatedAt) / 86400000);
+      const score = Number(row.saved_30d ?? 0) + 1 / (1 + daysOld);
+      return {
+        recipe: mapFeedRecipe(row, nutritionMap, allergenMap),
+        score,
+        reasons: [],
+      };
+    });
   } catch (error) {
     console.error("Personalized feed error:", error);
     throw new Error("Failed to generate personalized feed");
   }
 }
 
-export async function getUserProfile(userId: string) {
-  const profile = await db
-    .select()
-    .from(userProfiles)
-    .where(eq(userProfiles.userId, userId))
-    .limit(1);
-  
-  return profile[0] || null;
-}
-
-export async function createOrUpdateUserProfile(userId: string, profileData: any) {
-  const existing = await getUserProfile(userId);
-  
-  if (existing) {
-    await db
-      .update(userProfiles)
-      .set({
-        ...profileData,
-        updatedAt: new Date(),
-      })
-      .where(eq(userProfiles.userId, userId));
-  } else {
-    await db.insert(userProfiles).values({
-      userId,
-      ...profileData,
-    });
-  }
-  
-  return getUserProfile(userId);
-}
-
-export async function getFeedRecommendations(userId: string): Promise<{
+export async function getFeedRecommendations(b2cCustomerId: string): Promise<{
   trending: any[];
   forYou: FeedResult[];
   recent: any[];
 }> {
   try {
-    // Get trending recipes (popular in last 7 days)
-    const trending = await executeRaw(`
-      SELECT r.*, COUNT(rh.id) as recent_activity
-      FROM recipes r
-      LEFT JOIN recipe_history rh ON r.id = rh.recipe_id 
-        AND rh.event = 'cooked' 
-        AND rh.at > NOW() - INTERVAL '7 days'
-      WHERE r.status = 'published' AND r.market_country = 'US'
-      GROUP BY r.id
-      ORDER BY recent_activity DESC, r.updated_at DESC
-      LIMIT 10
-    `);
-    
-    // Get personalized recommendations
-    const forYou = await getPersonalizedFeed(userId, 20);
-    
-    // Get recently published recipes
-    const recent = await db
-      .select()
-      .from(recipes)
-      .where(eq(recipes.status, "published"))
-      .orderBy(recipes.publishedAt)
-      .limit(10);
-    
+    const trendingRows = await executeRaw(
+      `
+      select
+        r.*,
+        c.id as cuisine_id,
+        c.code as cuisine_code,
+        c.name as cuisine_name,
+        coalesce(p.saved_7d, 0) as saved_7d
+      from gold.recipes r
+      left join gold.cuisines c on c.id = r.cuisine_id
+      left join lateral (
+        select count(*)::int as saved_7d
+        from gold.customer_product_interactions cpi
+        where cpi.recipe_id = r.id
+          and cpi.entity_type = 'recipe'
+          and cpi.interaction_type = 'saved'
+          and cpi.interaction_timestamp > now() - interval '7 days'
+      ) p on true
+      order by saved_7d desc nulls last, r.updated_at desc
+      limit 10
+      `
+    );
+
+    const recentRows = await executeRaw(
+      `
+      select
+        r.*,
+        c.id as cuisine_id,
+        c.code as cuisine_code,
+        c.name as cuisine_name
+      from gold.recipes r
+      left join gold.cuisines c on c.id = r.cuisine_id
+      order by r.updated_at desc nulls last
+      limit 10
+      `
+    );
+
+    const ids = [...trendingRows, ...recentRows].map((r: any) => r.id);
+    const nutritionMap = await getRecipeNutritionMap(ids);
+    const allergenMap = await getRecipeAllergenMap(ids);
+
+    const trending = trendingRows.map((row: any) => mapFeedRecipe(row, nutritionMap, allergenMap));
+    const recent = recentRows.map((row: any) => mapFeedRecipe(row, nutritionMap, allergenMap));
+    const forYou = await getPersonalizedFeed(b2cCustomerId, 20);
+
     return {
       trending,
       forYou,

@@ -1,7 +1,8 @@
 import { Router } from "express";
-import { createUserRecipe, deleteUserRecipe, getUserRecipe, listUserRecipes, updateUserRecipe,  } from "../services/recipes.js";
+import { createUserRecipe, deleteUserRecipe, getUserRecipe, getUserRecipes, updateUserRecipe } from "../services/userContent.js";
+import { requireB2cCustomerIdFromReq } from "../services/b2cIdentity.js";
+import { authMiddleware } from "../middleware/auth.js";
 
-// re-use the tolerant body + id resolver we used on sync routes
 function getJsonBody(req: any) {
   if (typeof req.body === "string") {
     try { return JSON.parse(req.body); } catch { return {}; }
@@ -9,52 +10,35 @@ function getJsonBody(req: any) {
   return req.body || {};
 }
 
-function resolveUserId(req: any): string {
-    const b = getJsonBody(req);
-    const headerId = (req.get?.("x-appwrite-user-id") ?? req.headers?.["x-appwrite-user-id"] ?? "").toString().trim();
-  
-    const v =
-      req?.user?.$id ?? req?.user?.id ??                 // from verified JWT (preferred)
-      headerId ??                                        // <-- accept header fallback
-      b?.appwriteUserId ?? b?.userId ??                  // body fallbacks you already had
-      b?.user?.$id ?? b?.user?.id ?? null;
-  
-    return (v == null ? "" : String(v)).trim();
-  }
-
-// ── Router
 const router = Router();
 
 /** GET /api/v1/user-recipes  (list current user's recipes) */
-router.get("/", async (req, res, next) => {
+router.get("/", authMiddleware, async (req, res, next) => {
   try {
-    const userId = resolveUserId(req);
-    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+    const b2cCustomerId = requireB2cCustomerIdFromReq(req);
     const limit = Math.max(1, Math.min(100, Number(req.query.limit ?? 50)));
     const offset = Math.max(0, Number(req.query.offset ?? 0));
-    const items = await listUserRecipes(userId, limit, offset);
+    const items = await getUserRecipes(b2cCustomerId, limit, offset);
     res.json({ items, limit, offset });
   } catch (err) { next(err); }
 });
 
 /** GET /api/v1/user-recipes/:id */
-router.get("/:id", async (req, res, next) => {
+router.get("/:id", authMiddleware, async (req, res, next) => {
   try {
-    const userId = resolveUserId(req);
-    if (!userId) return res.status(401).json({ error: "Unauthorized" });
-    const row = await getUserRecipe(userId, req.params.id);
+    const b2cCustomerId = requireB2cCustomerIdFromReq(req);
+    const row = await getUserRecipe(b2cCustomerId, req.params.id);
     res.json(row);
   } catch (err) { next(err); }
 });
 
 /** POST /api/v1/user-recipes */
-router.post("/", async (req, res, next) => {
+router.post("/", authMiddleware, async (req, res, next) => {
   try {
-    const userId = resolveUserId(req);
-    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+    const b2cCustomerId = requireB2cCustomerIdFromReq(req);
 
     const body = getJsonBody(req);
-    const p = body?.recipe ?? body; // accept {recipe:{...}} or the object directly
+    const p = body?.recipe ?? body;
 
     if (!p?.title || String(p.title).trim().length < 2) {
       return res.status(400).json({ error: "Title is required" });
@@ -66,29 +50,26 @@ router.post("/", async (req, res, next) => {
       return res.status(400).json({ error: "At least one instruction step is required" });
     }
 
-    const row = await createUserRecipe(userId, p);
+    const row = await createUserRecipe(b2cCustomerId, p);
     res.status(201).json(row);
   } catch (err) { next(err); }
 });
 
 /** PATCH /api/v1/user-recipes/:id */
-router.patch("/:id", async (req, res, next) => {
+router.patch("/:id", authMiddleware, async (req, res, next) => {
   try {
-    const userId = resolveUserId(req);
-    if (!userId) return res.status(401).json({ error: "Unauthorized" });
-
     const patch = getJsonBody(req)?.recipe ?? getJsonBody(req);
-    const row = await updateUserRecipe(userId, req.params.id, patch);
+    const b2cCustomerId = requireB2cCustomerIdFromReq(req);
+    const row = await updateUserRecipe(b2cCustomerId, req.params.id, patch);
     res.json(row);
   } catch (err) { next(err); }
 });
 
 /** DELETE /api/v1/user-recipes/:id */
-router.delete("/:id", async (req, res, next) => {
+router.delete("/:id", authMiddleware, async (req, res, next) => {
   try {
-    const userId = resolveUserId(req);
-    if (!userId) return res.status(401).json({ error: "Unauthorized" });
-    await deleteUserRecipe(userId, req.params.id);
+    const b2cCustomerId = requireB2cCustomerIdFromReq(req);
+    await deleteUserRecipe(b2cCustomerId, req.params.id);
     res.status(204).end();
   } catch (err) { next(err); }
 });

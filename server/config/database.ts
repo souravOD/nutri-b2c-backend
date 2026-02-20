@@ -1,6 +1,7 @@
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
-import * as schema from "../../shared/schema.js";
+import * as baseSchema from "../../shared/schema.js";
+import * as goldSchema from "../../shared/goldSchema.js";
 import { env } from "./env.js";
 
 if (!env.DATABASE_URL) {
@@ -31,6 +32,8 @@ export const replicaClient = postgres(replicaUrl, {
     undefined: null,
   },
 });
+
+const schema = { ...baseSchema, ...goldSchema };
 
 // Drizzle instances
 export const db = drizzle(queryClient, { schema });

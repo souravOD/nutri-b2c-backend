@@ -66,6 +66,28 @@ export function errorHandler(err: any, req: Request, res: Response, next: NextFu
       detail: 'Referenced resource does not exist',
       instance: req.url,
     };
+  } else if (err.code === '42703') { // PostgreSQL undefined_column
+    problemDetail = {
+      type: 'https://nutrition-app.com/schema-out-of-date',
+      title: 'Database Schema Out of Date',
+      status: 503,
+      detail: 'A required database column is missing. Run the latest migrations (e.g. migrations/009_meal_plan_ai_columns.sql) against the database used by DATABASE_URL.',
+      instance: req.url,
+      migration: '009_meal_plan_ai_columns.sql',
+    };
+  } else if (
+    (typeof err.status === 'number' && err.status >= 400 && err.status < 600) ||
+    (typeof err.statusCode === 'number' && err.statusCode >= 400 && err.statusCode < 600)
+  ) {
+    // Errors thrown with .status/.statusCode set (e.g. meal plan "no recipes", not found)
+    const status = typeof err.status === 'number' ? err.status : err.statusCode;
+    problemDetail = {
+      type: 'about:blank',
+      title: status === 404 ? 'Not Found' : status === 422 ? 'Unprocessable Entity' : 'Error',
+      status,
+      detail: err.message || 'An error occurred',
+      instance: req.url,
+    };
   } else {
     problemDetail = {
       type: 'about:blank',

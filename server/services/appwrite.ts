@@ -51,3 +51,55 @@ export async function deleteAppwriteUser(userId: string) {
     // Ignore if already gone
   }
 }
+
+/**
+ * Write profile changes back to Appwrite profiles collection.
+ * Best-effort — failures are logged but don't break the caller.
+ */
+export async function updateAppwriteProfile(
+  userId: string,
+  data: { displayName?: string | null; email?: string | null }
+) {
+  if (!APPWRITE_DB_ID || !APPWRITE_PROFILES_COLLECTION_ID) return;
+  const { db } = admin();
+  const payload: Record<string, any> = {};
+  if (data.displayName !== undefined) payload.displayName = data.displayName ?? "";
+  if (data.email !== undefined) payload.email = data.email ?? "";
+  if (Object.keys(payload).length === 0) return;
+  try {
+    await db.updateDocument(APPWRITE_DB_ID, APPWRITE_PROFILES_COLLECTION_ID, userId, payload);
+  } catch (e) {
+    console.warn("[appwrite] profile write-back failed:", e);
+  }
+}
+
+/**
+ * Write health changes back to Appwrite health_profiles collection.
+ * Best-effort — failures are logged but don't break the caller.
+ */
+export async function updateAppwriteHealth(
+  userId: string,
+  data: Record<string, any>
+) {
+  if (!APPWRITE_DB_ID || !APPWRITE_HEALTH_COLLECTION_ID) return;
+  const { db } = admin();
+
+  // Only send fields that the Appwrite schema supports
+  const allowed = [
+    "dateOfBirth", "sex", "activityLevel", "goal", "height", "weight",
+    "diets", "allergens", "intolerances", "dislikedIngredients",
+    "major_conditions", "diet_codes", "diet_ids", "allergen_codes",
+    "allergen_ids", "condition_codes", "condition_ids", "onboardingComplete",
+  ];
+  const payload: Record<string, any> = {};
+  for (const key of allowed) {
+    if (data[key] !== undefined) payload[key] = data[key];
+  }
+  if (Object.keys(payload).length === 0) return;
+
+  try {
+    await db.updateDocument(APPWRITE_DB_ID, APPWRITE_HEALTH_COLLECTION_ID, userId, payload);
+  } catch (e) {
+    console.warn("[appwrite] health write-back failed:", e);
+  }
+}

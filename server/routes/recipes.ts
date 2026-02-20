@@ -1,12 +1,16 @@
 import { Router } from "express";
+import type { Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { authMiddleware } from "../middleware/auth.js";
 import { rateLimitMiddleware } from "../middleware/rateLimit.js";
 import { searchRecipes, getRecipeDetail, getPopularRecipes } from "../services/search.js";
-import { toggleSaveRecipe, getSavedRecipes, logRecipeHistory, getRecipeHistory, getRecentlyViewed, getMostCooked, getSharedRecipe } from "../services/recipes.js";
-import { insertRecipeHistorySchema, insertRecipeReportSchema } from "../../shared/schema.js";
-import { db } from "../config/database.js";
-import { recipeReports } from "../../shared/schema.js";
+import { toggleSaveRecipe } from "../services/recipes.js";
+import { requireB2cCustomerIdFromReq } from "../services/b2cIdentity.js";
+import {
+  rateRecipe,
+  getUserRating,
+  getRecipeAverageRating,
+} from "../services/recipeRating.js";
 
 const num = (v: any) =>
   v === undefined || v === null || v === "" || v === "undefined" || v === "null"
@@ -70,7 +74,8 @@ router.get("/:id", rateLimitMiddleware, async (req, res, next) => {
 // User interactions (require auth)
 router.post("/:id/save", authMiddleware, rateLimitMiddleware, async (req, res, next) => {
   try {
-    const result = await toggleSaveRecipe(req.user.effectiveUserId, req.params.id);
+    const b2cCustomerId = requireB2cCustomerIdFromReq(req);
+    const result = await toggleSaveRecipe(b2cCustomerId, req.params.id);
     res.json(result);
   } catch (error) {
     next(error);
@@ -79,14 +84,44 @@ router.post("/:id/save", authMiddleware, rateLimitMiddleware, async (req, res, n
 
 router.post("/:id/report", authMiddleware, rateLimitMiddleware, async (req, res, next) => {
   try {
-    const reportData = insertRecipeReportSchema.parse({
-      ...req.body,
-      reporterUserId: req.user.effectiveUserId,
-      recipeId: req.params.id,
-    });
-    
-    const report = await db.insert(recipeReports).values(reportData).returning();
-    res.status(201).json(report[0]);
+    res.status(501).json({ error: "Recipe reporting is not supported in the gold schema." });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ── Recipe Ratings ──────────────────────────────────────────────────────────
+
+const rateSchema = z.object({
+  rating: z.number().int().min(1).max(5),
+  feedbackText: z.string().max(2000).optional(),
+  likedAspects: z.array(z.string()).optional(),
+  dislikedAspects: z.array(z.string()).optional(),
+  wouldMakeAgain: z.boolean().optional(),
+  mealPlanItemId: z.string().uuid().optional(),
+});
+
+// POST /api/v1/recipes/:id/rate
+router.post("/:id/rate", authMiddleware, rateLimitMiddleware, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const b2cCustomerId = requireB2cCustomerIdFromReq(req);
+    const parsed = rateSchema.parse(req.body);
+    const result = await rateRecipe(b2cCustomerId, req.params.id, parsed);
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/v1/recipes/:id/rating
+router.get("/:id/rating", authMiddleware, rateLimitMiddleware, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const b2cCustomerId = requireB2cCustomerIdFromReq(req);
+    const [myRating, average] = await Promise.all([
+      getUserRating(b2cCustomerId, req.params.id),
+      getRecipeAverageRating(req.params.id),
+    ]);
+    res.json({ myRating, ...average });
   } catch (error) {
     next(error);
   }
@@ -95,8 +130,7 @@ router.post("/:id/report", authMiddleware, rateLimitMiddleware, async (req, res,
 // Shared recipe access (no auth required)
 router.get("/r/:shareSlug", rateLimitMiddleware, async (req, res, next) => {
   try {
-    const recipe = await getSharedRecipe(req.params.shareSlug);
-    res.json(recipe);
+    res.status(501).json({ error: "Shared recipes are not supported in the gold schema." });
   } catch (error) {
     next(error);
   }

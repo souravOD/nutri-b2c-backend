@@ -1,77 +1,87 @@
 import type { Request, Response, NextFunction } from "express";
 import { createHash } from "crypto";
-import { db } from "../config/database.js";
-import { idempotencyKeys } from "../../shared/schema.js";
-import { eq, and } from "drizzle-orm";
+
+type IdempotencyRecord = {
+  method: string;
+  path: string;
+  requestHash: string;
+  responseStatus?: number;
+  responseBody?: any;
+  expiresAt: number;
+};
+
+const TTL_MS = Number(process.env.IDEMPOTENCY_TTL_MS ?? 15 * 60 * 1000);
+const store = new Map<string, IdempotencyRecord>();
+
+function getRecord(key: string): IdempotencyRecord | undefined {
+  const record = store.get(key);
+  if (!record) return undefined;
+  if (record.expiresAt <= Date.now()) {
+    store.delete(key);
+    return undefined;
+  }
+  return record;
+}
 
 export async function idempotencyMiddleware(req: Request, res: Response, next: NextFunction) {
-  const idempotencyKey = req.headers['idempotency-key'] as string;
-  
-  // Require idempotency key for state-changing operations
-  if (['POST', 'PUT', 'PATCH'].includes(req.method) && !idempotencyKey) {
+  const idempotencyKey = req.headers["idempotency-key"] as string | undefined;
+
+  if (["POST", "PUT", "PATCH"].includes(req.method) && !idempotencyKey) {
     return res.status(400).json({
-      type: 'about:blank',
-      title: 'Bad Request',
+      type: "about:blank",
+      title: "Bad Request",
       status: 400,
-      detail: 'Idempotency-Key header required for state-changing operations',
-      instance: req.url
+      detail: "Idempotency-Key header required for state-changing operations",
+      instance: req.url,
     });
   }
-  
+
   if (!idempotencyKey) {
     return next();
   }
-  
+
   try {
-    // Create request hash
-    const requestHash = createHash('sha256')
+    const requestHash = createHash("sha256")
       .update(JSON.stringify(req.body || {}))
-      .digest('hex');
-    
-    // Check for existing request
-    const existing = await db
-      .select()
-      .from(idempotencyKeys)
-      .where(
-        and(
-          eq(idempotencyKeys.key, idempotencyKey),
-          eq(idempotencyKeys.method, req.method),
-          eq(idempotencyKeys.path, req.path)
-        )
-      )
-      .limit(1);
-    
-    if (existing.length > 0) {
-      const record = existing[0];
-      
-      // Check if request body is different
-      if (record.requestHash !== requestHash) {
+      .digest("hex");
+
+    const existing = getRecord(idempotencyKey);
+
+    if (existing) {
+      if (existing.method !== req.method || existing.path !== req.path) {
         return res.status(409).json({
-          type: 'about:blank',
-          title: 'Conflict',
+          type: "about:blank",
+          title: "Conflict",
           status: 409,
-          detail: 'Idempotency key reused with different request body',
-          instance: req.url
+          detail: "Idempotency key reused with different method or path",
+          instance: req.url,
         });
       }
-      
-      // Return cached response if already processed
-      if (record.responseStatus && record.responseBody) {
-        return res.status(record.responseStatus).json(record.responseBody);
+
+      if (existing.requestHash !== requestHash) {
+        return res.status(409).json({
+          type: "about:blank",
+          title: "Conflict",
+          status: 409,
+          detail: "Idempotency key reused with different request body",
+          instance: req.url,
+        });
+      }
+
+      if (existing.responseStatus !== undefined) {
+        return res.status(existing.responseStatus).json(existing.responseBody);
       }
     } else {
-      // Store new idempotency key
-      await db.insert(idempotencyKeys).values({
-        key: idempotencyKey,
+      store.set(idempotencyKey, {
         method: req.method,
         path: req.path,
         requestHash,
+        expiresAt: Date.now() + TTL_MS,
       });
     }
-    
-    // Store idempotency info for response handling
+
     res.locals.idempotencyKey = idempotencyKey;
-    
+
     next();
   } catch (error) {
     console.error("Idempotency middleware error:", error);
@@ -79,26 +89,22 @@ export async function idempotencyMiddleware(req: Request, res: Response, next: N
   }
 }
 
-// Middleware to store response for idempotency
 export function storeIdempotentResponse(req: Request, res: Response, next: NextFunction) {
   const originalJson = res.json;
-  const idempotencyKey = res.locals.idempotencyKey;
-  
-  if (idempotencyKey && ['POST', 'PUT', 'PATCH'].includes(req.method)) {
-    res.json = function(body: any) {
-      // Store the response
-      db.update(idempotencyKeys)
-        .set({
-          responseStatus: res.statusCode,
-          responseBody: body,
-          processedAt: new Date(),
-        })
-        .where(eq(idempotencyKeys.key, idempotencyKey))
-        .catch(err => console.error("Failed to store idempotent response:", err));
-      
+  const idempotencyKey = res.locals.idempotencyKey as string | undefined;
+
+  if (idempotencyKey && ["POST", "PUT", "PATCH"].includes(req.method)) {
+    res.json = function (body: any) {
+      const record = getRecord(idempotencyKey);
+      if (record) {
+        record.responseStatus = res.statusCode;
+        record.responseBody = body;
+        record.expiresAt = Date.now() + TTL_MS;
+        store.set(idempotencyKey, record);
+      }
       return originalJson.call(this, body);
     };
   }
-  
+
   next();
 }

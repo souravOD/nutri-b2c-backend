@@ -5,6 +5,7 @@ import type { Request, Response, NextFunction } from "express";
 import { verifyAppwriteJWT, extractJWTFromHeaders } from "../auth/jwt.js";
 import { handleAdminImpersonation } from "../auth/admin.js";
 import { setCurrentUser } from "../config/database.js";
+import { getB2cCustomerByAppwriteId } from "../services/b2cIdentity.js";
 import { AppError } from "./errorHandler.js";
 
 /**
@@ -14,6 +15,7 @@ import { AppError } from "./errorHandler.js";
 export type UserContext = {
   userId: string;
   effectiveUserId?: string;
+  b2cCustomerId?: string;
   isAdmin?: boolean;
   isImpersonating?: boolean;
   profile?: any;
@@ -57,9 +59,14 @@ export async function authMiddleware(
     // Allow admin read-only impersonation (function enforces rules)
     const ctx = await handleAdminImpersonation(req, baseCtx);
 
+    // Resolve Gold b2c_customers.id once (uses unique index — fast)
+    const effectiveId = ctx.effectiveUserId ?? ctx.userId;
+    const customer = await getB2cCustomerByAppwriteId(effectiveId);
+
     // Expose to downstream handlers (keep it flexible type-wise)
     (req as any).user = {
       ...ctx,
+      b2cCustomerId: customer?.id ?? undefined,
     } as UserContext;
 
     // Set effective user for DB/RLS context
