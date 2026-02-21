@@ -4,7 +4,6 @@ import recipesRouter from "./routes/recipes.js";
 import feedRouter from "./routes/feed.js";
 import userRouter from "./routes/user.js";
 import adminRouter from "./routes/admin.js";
-import b2bRouter from "./routes/b2b.js";
 import healthRouter from "./routes/health.js";
 import syncRouter from "./routes/sync.js";
 import taxonomyRouter from "./routes/taxonomy.js";
@@ -30,7 +29,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.use("/api/v1/feed", feedRouter);
   app.use("/api/v1/me", userRouter);
   app.use("/api/v1/admin", adminRouter);
-  app.use("/api/v1/b2b", b2bRouter);
   app.use("/api/v1/sync", syncRouter);
   app.use("/api/v1/taxonomy", taxonomyRouter);
   app.use("/api/v1/user-recipes", userRecipesRouter);

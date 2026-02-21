@@ -314,7 +314,6 @@ export const nutritionFacts = gold.table("nutrition_facts", {
 export const customerProductInteractions = gold.table("customer_product_interactions", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
   b2cCustomerId: uuid("b2c_customer_id"),
-  b2bCustomerId: uuid("b2b_customer_id"),
   householdId: uuid("household_id"),
   productId: uuid("product_id"),
   interactionType: varchar("interaction_type", { length: 20 }),
@@ -576,7 +575,6 @@ export const mealPlans = gold.table("meal_plans", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
   householdId: uuid("household_id"),
   b2cCustomerId: uuid("b2c_customer_id"),
-  b2bCustomerId: uuid("b2b_customer_id"),
   planName: varchar("plan_name", { length: 255 }),
   startDate: date("start_date").notNull(),
   endDate: date("end_date").notNull(),
@@ -632,7 +630,6 @@ export const shoppingLists = gold.table("shopping_lists", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
   householdId: uuid("household_id"),
   b2cCustomerId: uuid("b2c_customer_id"),
-  b2bCustomerId: uuid("b2b_customer_id"),
   mealPlanId: uuid("meal_plan_id"),
   listName: varchar("list_name", { length: 255 }),
   vendorId: uuid("vendor_id"),

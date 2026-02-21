@@ -95,50 +95,6 @@ export async function checkReplicationLag(): Promise<number> {
   }
 }
 
-// Enterprise partition management
-export async function createVendorPartitions(vendorId: string): Promise<void> {
-  const vendorUuid = vendorId.replace(/-/g, '');
-  
-  try {
-    // Create products partitions (16 hash sub-partitions)
-    await executeRaw(`
-      CREATE TABLE IF NOT EXISTS products_vendor_${vendorUuid} 
-      PARTITION OF products 
-      FOR VALUES IN ('${vendorId}') 
-      PARTITION BY HASH (id)
-    `);
-    
-    for (let i = 0; i < 16; i++) {
-      await executeRaw(`
-        CREATE TABLE IF NOT EXISTS products_vendor_${vendorUuid}_${i} 
-        PARTITION OF products_vendor_${vendorUuid} 
-        FOR VALUES WITH (modulus 16, remainder ${i})
-      `);
-    }
-    
-    // Create customers partitions (32 hash sub-partitions)
-    await executeRaw(`
-      CREATE TABLE IF NOT EXISTS customers_vendor_${vendorUuid} 
-      PARTITION OF customers 
-      FOR VALUES IN ('${vendorId}') 
-      PARTITION BY HASH (id)
-    `);
-    
-    for (let i = 0; i < 32; i++) {
-      await executeRaw(`
-        CREATE TABLE IF NOT EXISTS customers_vendor_${vendorUuid}_${i} 
-        PARTITION OF customers_vendor_${vendorUuid} 
-        FOR VALUES WITH (modulus 32, remainder ${i})
-      `);
-    }
-    
-    console.log(`Created partitions for vendor ${vendorId}`);
-  } catch (error) {
-    console.error(`Failed to create partitions for vendor ${vendorId}:`, error);
-    throw error;
-  }
-}
-
 // Health check function
 export async function checkDatabaseHealth(): Promise<boolean> {
   try {
@@ -147,42 +103,6 @@ export async function checkDatabaseHealth(): Promise<boolean> {
   } catch (error) {
     console.error("Database health check failed:", error);
     return false;
-  }
-}
-
-// Enterprise audit logging
-export async function auditHealthDataAccess(
-  vendorId: string,
-  actorUserId: string,
-  action: string,
-  entityId: string,
-  before?: any,
-  after?: any,
-  justification?: string,
-  req?: any
-): Promise<void> {
-  try {
-    await db.insert(schema.enterpriseAuditLog).values({
-      vendorId,
-      actorUserId,
-      actorRole: req?.user?.role || 'unknown',
-      actorEmail: req?.user?.email || 'unknown',
-      action,
-      entity: 'customer_health_profile',
-      entityId,
-      before: before ? JSON.stringify(before) : null,
-      after: after ? JSON.stringify(after) : null,
-      businessJustification: justification,
-      ip: req?.ip,
-      userAgent: req?.headers?.['user-agent'],
-      apiEndpoint: req?.originalUrl,
-      requestId: req?.headers?.['x-request-id'],
-      hipaaCategory: 'technical',
-      riskLevel: action.includes('DELETE') ? 'high' : 'medium',
-    });
-  } catch (error) {
-    console.error('Audit logging failed:', error);
-    // Don't throw - audit failures shouldn't break the main operation
   }
 }
 
