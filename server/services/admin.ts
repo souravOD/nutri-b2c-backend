@@ -100,15 +100,22 @@ export async function resolveReport(
 }
 
 export async function getAuditLog(limit: number = 100, offset: number = 0, actorUserId?: string) {
-  let query = db.select().from(auditLog);
-
   if (actorUserId) {
-    query = query.where(eq(auditLog.changedBy, actorUserId));
+    return db
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.changedBy, actorUserId))
+      .orderBy(desc(auditLog.changedAt))
+      .limit(limit)
+      .offset(offset);
   }
 
-  const logs = await query.orderBy(desc(auditLog.changedAt)).limit(limit).offset(offset);
-
-  return logs;
+  return db
+    .select()
+    .from(auditLog)
+    .orderBy(desc(auditLog.changedAt))
+    .limit(limit)
+    .offset(offset);
 }
 
 export async function auditImpersonation(

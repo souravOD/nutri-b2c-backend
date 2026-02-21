@@ -36,9 +36,8 @@ export default function AdminRecipes() {
 
   const deleteRecipe = useMutation({
     mutationFn: async (id: string) => {
-      return apiRequest(`/api/v1/admin/recipes/${id}`, {
-        method: "DELETE",
-        body: JSON.stringify({ reason: "Deleted via admin interface" })
+      return apiRequest("DELETE", `/api/v1/admin/recipes/${id}`, {
+        reason: "Deleted via admin interface",
       });
     },
     onSuccess: () => {

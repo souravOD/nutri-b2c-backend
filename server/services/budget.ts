@@ -672,10 +672,11 @@ export async function getBudgetRecommendations(
 
   const llmTips = await enrichRecommendationsWithLLM(ruleTips, snapshot);
   const tips = mergeRecommendations(ruleTips, llmTips);
+  const source: "rules" | "hybrid" = llmTips && llmTips.length > 0 ? "hybrid" : "rules";
 
   const response = {
     tips,
-    source: llmTips && llmTips.length > 0 ? "hybrid" : "rules",
+    source,
     generatedAt: new Date().toISOString(),
   };
 

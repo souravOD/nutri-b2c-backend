@@ -150,8 +150,8 @@ export async function analyzeRecipeWithLLM(text: string): Promise<LLMAnalysisRes
       response_format: { type: "json_object" },
       temperature: 0.1,
       reasoning_effort: "low" as any,
-      timeout: 60000,
-    });
+      stream: false,
+    }, { timeout: 60000 });
 
     console.log("[LLM] Received response:", { 
       hasContent: !!response.choices[0]?.message?.content,
@@ -252,8 +252,8 @@ export async function extractTextFromImage(imageBuffer: Buffer): Promise<string>
         },
       ],
       temperature: 0.1,
-      timeout: 60000, // 60 seconds timeout for vision
-    });
+      stream: false,
+    }, { timeout: 60000 }); // 60 seconds timeout for vision
 
     const content = response.choices[0]?.message?.content;
     if (!content) {

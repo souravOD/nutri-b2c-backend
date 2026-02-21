@@ -19,6 +19,13 @@ type IngredientInput = {
   note?: string | null;
 };
 
+function toNullableNumericString(value: number | string | null | undefined): string | null {
+  if (value === "" || value == null) return null;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return null;
+  return String(numeric);
+}
+
 function normalizeRecipeInput(payload: AnyObj) {
   const cuisineRaw = payload.cuisine ?? (Array.isArray(payload.cuisines) ? payload.cuisines[0] : null);
   return {
@@ -83,7 +90,7 @@ async function replaceRecipeIngredients(recipeId: string, rows: IngredientInput[
     await db.insert(recipeIngredients).values({
       recipeId,
       ingredientId,
-      quantity: row.qty === "" || row.qty == null ? null : Number(row.qty),
+      quantity: toNullableNumericString(row.qty),
       unit: row.unit ? String(row.unit) : null,
       preparationNote: row.note ? String(row.note) : null,
       ingredientOrder: i + 1,
@@ -133,7 +140,7 @@ async function replaceRecipeNutrition(recipeId: string, nutrition: AnyObj) {
       entityType: "recipe",
       entityId: recipeId,
       nutrientId: def.id,
-      amount: entry.amount,
+      amount: String(entry.amount),
       unit: def.unit ?? "g",
       createdAt: new Date(),
       updatedAt: new Date(),

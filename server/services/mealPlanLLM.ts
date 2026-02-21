@@ -304,8 +304,8 @@ ${JSON.stringify(recipeSummary, null, 2)}`;
         ],
         response_format: { type: "json_object" },
         temperature: 0.3,
-        timeout: MEAL_PLAN_TIMEOUT,
-      }),
+        stream: false,
+      }, { timeout: MEAL_PLAN_TIMEOUT }),
       MEAL_PLAN_TIMEOUT + 2000,
       "meal plan generation"
     );
@@ -409,8 +409,8 @@ ${JSON.stringify(context.alternatives.map((a) => ({
         ],
         response_format: { type: "json_object" },
         temperature: 0.3,
-        timeout: MEAL_SWAP_TIMEOUT,
-      }),
+        stream: false,
+      }, { timeout: MEAL_SWAP_TIMEOUT }),
       MEAL_SWAP_TIMEOUT + 2000,
       "meal swap suggestion"
     );

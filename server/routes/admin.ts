@@ -1,8 +1,7 @@
-import { Router } from "express";
+import { Router, type Request, type Response, type NextFunction } from "express";
 import { authMiddleware } from "../middleware/auth.js";
 import { rateLimitMiddleware } from "../middleware/rateLimit.js";
 import { auditedRoute } from "../middleware/audit.js";
-import { requireAdmin } from "../auth/admin.js";
 import { setCurrentUser } from "../config/database.js";
 import { 
   createCuratedRecipe, 
@@ -14,6 +13,16 @@ import {
 import { insertRecipeSchema } from "../../shared/goldSchema.js";
 
 const router = Router();
+
+function requireAdminUserId(req: Request): string {
+  const userId = req.user?.userId;
+  if (!userId) {
+    const err = new Error("Unauthorized");
+    (err as any).status = 401;
+    throw err;
+  }
+  return userId;
+}
 
 // Development bypass for all admin routes
 if (process.env.NODE_ENV === 'development') {
@@ -32,8 +41,25 @@ if (process.env.NODE_ENV === 'development') {
 } else {
   // Require admin for all routes in production
   router.use(authMiddleware);
-  router.use((req, res, next) => {
-    requireAdmin(req.user);
+  router.use((req: Request, res: Response, next: NextFunction) => {
+    if (!req.user) {
+      return res.status(401).json({
+        type: "about:blank",
+        title: "Unauthorized",
+        status: 401,
+        detail: "Authentication required",
+        instance: req.url,
+      });
+    }
+    if (!req.user.isAdmin) {
+      return res.status(403).json({
+        type: "about:blank",
+        title: "Forbidden",
+        status: 403,
+        detail: "Admin access required",
+        instance: req.url,
+      });
+    }
     next();
   });
 }
@@ -53,7 +79,7 @@ router.get("/dashboard", async (req, res, next) => {
 router.post("/recipes", auditedRoute(async (req, res, next) => {
   try {
     const recipeData = insertRecipeSchema.parse(req.body);
-    const recipe = await createCuratedRecipe(req.user.userId, recipeData, req.body.reason);
+    const recipe = await createCuratedRecipe(requireAdminUserId(req), recipeData, req.body.reason);
     res.status(201).json(recipe);
   } catch (error) {
     next(error);
@@ -63,7 +89,7 @@ router.post("/recipes", auditedRoute(async (req, res, next) => {
 router.put("/recipes/:id", auditedRoute(async (req, res, next) => {
   try {
     const updates = insertRecipeSchema.partial().parse(req.body);
-    const recipe = await updateCuratedRecipe(req.user.userId, req.params.id, updates, req.body.reason);
+    const recipe = await updateCuratedRecipe(requireAdminUserId(req), req.params.id, updates, req.body.reason);
     res.json(recipe);
   } catch (error) {
     next(error);
@@ -83,7 +109,7 @@ router.delete("/recipes/:id", auditedRoute(async (req, res, next) => {
       });
     }
     
-    const result = await deleteCuratedRecipe(req.user.userId, req.params.id, reason);
+    const result = await deleteCuratedRecipe(requireAdminUserId(req), req.params.id, reason);
     res.json(result);
   } catch (error) {
     next(error);

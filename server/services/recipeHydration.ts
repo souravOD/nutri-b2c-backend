@@ -122,5 +122,5 @@ export async function getRecipeIngredients(recipeId: string) {
     `,
     [recipeId]
   );
-  return rows as RecipeIngredientRow[];
+  return rows as unknown as RecipeIngredientRow[];
 }

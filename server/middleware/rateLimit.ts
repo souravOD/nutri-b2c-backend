@@ -59,9 +59,9 @@ export async function rateLimitMiddleware(req: Request, res: Response, next: Nex
 // Cleanup old entries periodically
 setInterval(() => {
   const now = Date.now();
-  for (const [key, bucket] of rateLimitStore.entries()) {
+  rateLimitStore.forEach((bucket, key) => {
     if (bucket.resetTime <= now) {
       rateLimitStore.delete(key);
     }
-  }
+  });
 }, 5 * 60 * 1000); // Cleanup every 5 minutes

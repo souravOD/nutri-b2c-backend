@@ -6,19 +6,37 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { MessageSquare, Clock, CheckCircle, XCircle } from "lucide-react";
 
+type ReportRow = { id: string };
+
+type ReviewStatus = "pending" | "approved" | "rejected";
+
+type UserRecipeRow = {
+  id: string;
+  title: string;
+  ownerUserId?: string;
+  createdAt?: string;
+  reviewStatus: ReviewStatus;
+};
+
+const statusBadgeClass: Record<ReviewStatus, string> = {
+  pending: "bg-orange-100 text-orange-800",
+  approved: "bg-green-100 text-green-800",
+  rejected: "bg-red-100 text-red-800",
+};
+
 export default function AdminUserContent() {
-  const { data: reports, isLoading: reportsLoading } = useQuery({
+  const { data: reports, isLoading: reportsLoading } = useQuery<ReportRow[]>({
     queryKey: ["/api/v1/admin/reports"],
     refetchInterval: 30000, // Refresh every 30 seconds
   });
 
-  const { data: userRecipes, isLoading: recipesLoading } = useQuery({
+  const { data: userRecipes, isLoading: recipesLoading } = useQuery<UserRecipeRow[]>({
     queryKey: ["/api/v1/user-recipes"],
   });
 
-  const pendingCount = Array.isArray(userRecipes) ? userRecipes.filter((r: any) => r.reviewStatus === 'pending').length : 0;
-  const approvedCount = Array.isArray(userRecipes) ? userRecipes.filter((r: any) => r.reviewStatus === 'approved').length : 0;
-  const rejectedCount = Array.isArray(userRecipes) ? userRecipes.filter((r: any) => r.reviewStatus === 'rejected').length : 0;
+  const pendingCount = Array.isArray(userRecipes) ? userRecipes.filter((r) => r.reviewStatus === "pending").length : 0;
+  const approvedCount = Array.isArray(userRecipes) ? userRecipes.filter((r) => r.reviewStatus === "approved").length : 0;
+  const rejectedCount = Array.isArray(userRecipes) ? userRecipes.filter((r) => r.reviewStatus === "rejected").length : 0;
 
   return (
     <div className="min-h-screen flex bg-gray-50">
@@ -105,18 +123,16 @@ export default function AdminUserContent() {
                 </div>
               ) : Array.isArray(userRecipes) && userRecipes.length > 0 ? (
                 <div className="space-y-4">
-                  {userRecipes.slice(0, 5).map((recipe: any) => (
+                  {userRecipes.slice(0, 5).map((recipe) => (
                     <div key={recipe.id} className="flex items-center justify-between p-4 border rounded-lg" data-testid={`user-recipe-${recipe.id}`}>
                       <div>
                         <h4 className="font-medium">{recipe.title}</h4>
                         <p className="text-sm text-gray-600">by {recipe.ownerUserId}</p>
-                        <p className="text-xs text-gray-500">Submitted {new Date(recipe.createdAt).toLocaleDateString()}</p>
+                        <p className="text-xs text-gray-500">
+                          Submitted {recipe.createdAt ? new Date(recipe.createdAt).toLocaleDateString() : "N/A"}
+                        </p>
                       </div>
-                      <Badge className={{
-                        pending: "bg-orange-100 text-orange-800",
-                        approved: "bg-green-100 text-green-800", 
-                        rejected: "bg-red-100 text-red-800"
-                      }[recipe.reviewStatus] || "bg-gray-100 text-gray-800"}>
+                      <Badge className={statusBadgeClass[recipe.reviewStatus]}>
                         {recipe.reviewStatus}
                       </Badge>
                     </div>

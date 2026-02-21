@@ -27,8 +27,9 @@ export default function AdminAudit() {
     return matchesSearch;
   }) : [];
 
-  const uniqueActions = Array.isArray(auditLogs) ? 
-    [...new Set(auditLogs.map((log: any) => log.action))] : [];
+  const uniqueActions = Array.isArray(auditLogs)
+    ? Array.from(new Set(auditLogs.map((log: any) => log.action)))
+    : [];
 
   const handleExport = () => {
     if (filteredLogs.length === 0) return;

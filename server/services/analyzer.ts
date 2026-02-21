@@ -18,8 +18,6 @@ import { eq, and, or, ilike } from "drizzle-orm";
 import { analyzeRecipeWithLLM, extractTextFromImage, type LLMAnalysisResult } from "./llm.js";
 import { createUserRecipe } from "./userContent.js";
 import * as cheerio from "cheerio";
-import { Readability } from "@mozilla/readability";
-import { JSDOM } from "jsdom";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -150,32 +148,34 @@ export async function analyzeUrl(
     }
 
     const html = await response.text();
+    const $ = cheerio.load(html);
 
-    // Extract recipe content using Readability
-    const dom = new JSDOM(html, { url });
-    const reader = new Readability(dom.window.document);
-    const article = reader.parse();
+    // Prefer explicit recipe containers first, then broader semantic regions.
+    const chunks = [
+      $("article").text(),
+      $(".recipe").text(),
+      $("[itemtype*='Recipe']").text(),
+      $("[class*='recipe']").text(),
+      $("main").text(),
+      $("body").text(),
+    ];
 
-    if (!article) {
-      // Fallback: try cheerio to find recipe content
-      const $ = cheerio.load(html);
-      const recipeText =
-        $("article").text() ||
-        $(".recipe").text() ||
-        $("[itemtype*='Recipe']").text() ||
-        $("main").text() ||
-        $("body").text();
+    const title =
+      $("meta[property='og:title']").attr("content") ||
+      $("meta[name='twitter:title']").attr("content") ||
+      $("title").first().text() ||
+      "";
 
-      if (!recipeText || recipeText.trim().length < 50) {
-        throw new Error("Could not extract recipe content from URL");
-      }
+    const recipeText = chunks
+      .map((v) => (v || "").replace(/\s+/g, " ").trim())
+      .find((v) => v.length >= 50);
 
-      return analyzeText(recipeText.trim(), b2cCustomerId, memberId);
+    if (!recipeText) {
+      throw new Error("Could not extract recipe content from URL");
     }
 
-    // Use Readability extracted content
-    const recipeText = `${article.title || ""}\n\n${article.textContent || ""}`;
-    return analyzeText(recipeText.trim(), b2cCustomerId, memberId);
+    const combined = `${title}\n\n${recipeText}`.trim();
+    return analyzeText(combined, b2cCustomerId, memberId);
   } catch (error: any) {
     console.error("[Analyzer] URL scraping failed:", error?.message || error);
     throw new Error(`Failed to analyze URL: ${error?.message || "Unknown error"}`);

@@ -19,20 +19,38 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 
+type DashboardStatsData = {
+  totalRecipes?: number;
+  activeUsers?: number;
+  searchQps?: number;
+  pendingReview?: number;
+};
+
+type AuditLogRow = {
+  id: string;
+  action: string;
+  at?: string;
+  actorUserId?: string;
+  targetTable?: string;
+  targetId?: string;
+};
+
+type ReportRow = { id: string };
+
 export default function AdminDashboard() {
   const [refreshing, setRefreshing] = useState(false);
 
-  const { data: dashboardStats, isLoading: statsLoading } = useQuery({
+  const { data: dashboardStats, isLoading: statsLoading } = useQuery<DashboardStatsData>({
     queryKey: ["/api/v1/admin/dashboard"],
     refetchInterval: 30000, // Refresh every 30 seconds
   });
 
-  const { data: auditLogs, isLoading: auditLoading } = useQuery({
+  const { data: auditLogs, isLoading: auditLoading } = useQuery<AuditLogRow[]>({
     queryKey: ["/api/v1/admin/audit"],
     enabled: true,
   });
 
-  const { data: reports, isLoading: reportsLoading } = useQuery({
+  const { data: reports, isLoading: reportsLoading } = useQuery<ReportRow[]>({
     queryKey: ["/api/v1/admin/reports"],
     enabled: true,
   });

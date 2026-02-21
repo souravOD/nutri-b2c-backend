@@ -51,6 +51,12 @@ function b2cCustomerId(req: Request): string {
   return requireB2cCustomerIdFromReq(req);
 }
 
+function toNullableNumericString(value: number | null | undefined): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  return String(value);
+}
+
 const profileSchema = z.object({
   fullName: z.string().min(1).optional().nullable(),
   email: z.string().email().optional().nullable(),
@@ -250,18 +256,18 @@ router.patch("/health", authMiddleware, rateLimitMiddleware, async (req, res, ne
 
     const payload = {
       b2cCustomerId: id,
-      heightCm: body.heightCm ?? undefined,
-      weightKg: body.weightKg ?? undefined,
+      heightCm: toNullableNumericString(body.heightCm),
+      weightKg: toNullableNumericString(body.weightKg),
       activityLevel: body.activityLevel ?? undefined,
       healthGoal: body.healthGoal ?? undefined,
-      targetWeightKg: body.targetWeightKg ?? undefined,
+      targetWeightKg: toNullableNumericString(body.targetWeightKg),
       targetCalories: body.targetCalories ?? undefined,
-      targetProteinG: body.targetProteinG ?? undefined,
-      targetCarbsG: body.targetCarbsG ?? undefined,
-      targetFatG: body.targetFatG ?? undefined,
-      targetFiberG: body.targetFiberG ?? undefined,
+      targetProteinG: toNullableNumericString(body.targetProteinG),
+      targetCarbsG: toNullableNumericString(body.targetCarbsG),
+      targetFatG: toNullableNumericString(body.targetFatG),
+      targetFiberG: toNullableNumericString(body.targetFiberG),
       targetSodiumMg: body.targetSodiumMg ?? undefined,
-      targetSugarG: body.targetSugarG ?? undefined,
+      targetSugarG: toNullableNumericString(body.targetSugarG),
       intolerances: body.intolerances ?? undefined,
       dislikedIngredients: body.dislikedIngredients ?? undefined,
       onboardingComplete: body.onboardingComplete ?? undefined,

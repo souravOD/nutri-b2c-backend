@@ -10,6 +10,7 @@ import {
 import {
   getOrCreateHousehold,
   getMemberHealthProfiles,
+  type MemberHealthProfile,
 } from "./household.js";
 import { getLowRatedRecipeIds } from "./recipeRating.js";
 import {
@@ -557,7 +558,8 @@ export async function swapMeal(
   const excludeIds = [...new Set([...currentPlanRecipeIds, ...lowRatedIds])];
 
   const memberIds = plan.memberIds ?? [];
-  const memberProfiles = memberIds.length > 0 ? await getMemberHealthProfiles(memberIds) : new Map();
+  const memberProfiles: Map<string, MemberHealthProfile> =
+    memberIds.length > 0 ? await getMemberHealthProfiles(memberIds) : new Map<string, MemberHealthProfile>();
 
   const members: MemberContext[] = [];
   for (const memberId of memberIds) {
