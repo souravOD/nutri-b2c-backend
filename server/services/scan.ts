@@ -8,6 +8,7 @@ import { eq, and } from "drizzle-orm";
 import { fetchFromOpenFoodFacts } from "./openfoodfacts.js";
 import type { NormalizedProduct } from "./openfoodfacts.js";
 import type { GoldProduct } from "../../shared/goldSchema.js";
+import { ragAlternatives } from "./ragClient.js";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -51,6 +52,17 @@ export interface ScanLookupResult {
     allergenWarnings: AllergenWarning[];
     healthWarnings: HealthWarning[];
     source: "cache" | "openfoodfacts" | "not_found";
+}
+
+export interface ProductAlternative {
+    productId: string;
+    name: string;
+    brand: string | null;
+    price: number | null;
+    imageUrl: string | null;
+    reason: string | null;
+    savings: number | null;
+    allergenSafe: boolean;
 }
 
 // ─── Product Lookup ─────────────────────────────────────────────────────────
@@ -563,3 +575,43 @@ export async function getScanHistory(
         total: countResult[0]?.total ?? 0,
     };
 }
+
+// ── Graph-Enhanced Scanner Alternatives (PRD-14) ────────────────────────────
+
+async function getMemberAllergenIds(memberId: string): Promise<string[]> {
+    const rows = (await executeRaw(
+        `SELECT allergen_id FROM gold.b2c_customer_allergens WHERE b2c_customer_id = $1 AND is_active = true`,
+        [memberId]
+    )) as any[];
+    return rows.map(r => r.allergen_id);
+}
+
+export async function lookupProductWithAlternatives(
+    barcode: string,
+    b2cCustomerId: string,
+    memberId?: string
+): Promise<ScanLookupResult & { alternatives: ProductAlternative[] }> {
+    const scanResult = await lookupProductByBarcode(barcode, b2cCustomerId, memberId);
+
+    let alternatives: ProductAlternative[] = [];
+    if (scanResult.product && scanResult.source !== "not_found") {
+        const allergenIds = await getMemberAllergenIds(memberId || b2cCustomerId);
+        const graphAlts = await ragAlternatives(scanResult.product.id, allergenIds);
+
+        if (graphAlts && graphAlts.alternatives.length > 0) {
+            alternatives = graphAlts.alternatives.map((alt: any) => ({
+                productId: alt.product_id,
+                name: alt.name,
+                brand: alt.brand ?? null,
+                price: alt.price ?? null,
+                imageUrl: alt.image_url ?? null,
+                reason: alt.reason ?? null,
+                savings: alt.savings ?? null,
+                allergenSafe: alt.allergen_safe ?? false,
+            }));
+        }
+    }
+
+    return { ...scanResult, alternatives };
+}
+

@@ -18,6 +18,8 @@ import nutritionDashboardRouter from "./routes/nutritionDashboard.js";
 import { errorHandler, notFoundHandler } from "./middleware/errorHandler.js";
 import { idempotencyMiddleware, storeIdempotentResponse } from "./middleware/idempotency.js";
 import userRecipesRouter from "./routes/userRecipes.js";
+import chatRouter from "./routes/chat.js";
+import substitutionRouter from "./routes/substitutions.js";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Global middleware
@@ -40,6 +42,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.use("/api/v1/grocery-lists", groceryListRouter);
   app.use("/api/v1/budget", budgetRouter);
   app.use("/api/v1/nutrition-dashboard", nutritionDashboardRouter);
+  app.use("/api/v1/chat", chatRouter);
+  app.use("/api/v1/substitutions", substitutionRouter);
   // Health checks (no /api prefix)
   app.use("/", healthRouter);
 

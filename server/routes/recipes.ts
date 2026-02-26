@@ -3,7 +3,7 @@ import type { Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { authMiddleware } from "../middleware/auth.js";
 import { rateLimitMiddleware } from "../middleware/rateLimit.js";
-import { searchRecipes, getRecipeDetail, getPopularRecipes } from "../services/search.js";
+import { searchRecipes, searchRecipesWithRAG, getRecipeDetail, getPopularRecipes } from "../services/search.js";
 import { toggleSaveRecipe } from "../services/recipes.js";
 import { requireB2cCustomerIdFromReq } from "../services/b2cIdentity.js";
 import {
@@ -44,8 +44,10 @@ router.get("/", rateLimitMiddleware, async (req, res, next) => {
       limit: req.query.limit ? parseInt(req.query.limit as string) : 50,
       offset: req.query.offset ? parseInt(req.query.offset as string) : 0,
     };
-    
-    const results = await searchRecipes(searchParams);
+
+    // PRD-10: Use graph-enhanced search (RAG → SQL fallback)
+    const b2cCustomerId = (req as any).user?.b2cCustomerId as string | undefined;
+    const results = await searchRecipesWithRAG(searchParams, b2cCustomerId);
     res.json(results);
   } catch (error) {
     next(error);

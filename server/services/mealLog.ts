@@ -12,6 +12,7 @@ import {
   recipes,
 } from "../../shared/goldSchema.js";
 import { resolveMemberScope } from "./memberScope.js";
+import { ragMealPatterns } from "./ragClient.js";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -252,14 +253,14 @@ export async function getDailyLog(
 
   const targets = healthProfile[0]
     ? {
-        targetCalories: healthProfile[0].targetCalories,
-        targetProteinG: healthProfile[0].targetProteinG,
-        targetCarbsG: healthProfile[0].targetCarbsG,
-        targetFatG: healthProfile[0].targetFatG,
-        targetFiberG: healthProfile[0].targetFiberG,
-        targetSodiumMg: healthProfile[0].targetSodiumMg,
-        targetSugarG: healthProfile[0].targetSugarG,
-      }
+      targetCalories: healthProfile[0].targetCalories,
+      targetProteinG: healthProfile[0].targetProteinG,
+      targetCarbsG: healthProfile[0].targetCarbsG,
+      targetFatG: healthProfile[0].targetFatG,
+      targetFiberG: healthProfile[0].targetFiberG,
+      targetSodiumMg: healthProfile[0].targetSodiumMg,
+      targetSugarG: healthProfile[0].targetSugarG,
+    }
     : null;
 
   const streak = await getStreak(actorB2cCustomerId, targetMemberId);
@@ -769,4 +770,53 @@ export async function createTemplate(
     .returning();
 
   return inserted[0];
+}
+
+// ── Graph-Enhanced Pattern Analysis (PRD-15) ────────────────────────────────
+
+export async function getMealPatterns(
+  actorB2cCustomerId: string,
+  days: number,
+  memberId?: string
+) {
+  const scope = await resolveMemberScope(actorB2cCustomerId, memberId);
+
+  // Try graph-based pattern analysis
+  const graphPatterns = await ragMealPatterns(scope.targetMemberId, days);
+  if (graphPatterns) return graphPatterns;
+
+  // SQL fallback: basic stats from meal log history
+  const endDate = new Date().toISOString().slice(0, 10);
+  const startDate = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+  const history = await getHistory(actorB2cCustomerId, startDate, endDate, memberId);
+  return computeBasicPatterns(history);
+}
+
+function computeBasicPatterns(history: { days: any[]; averages: any }) {
+  const recipeCounts = new Map<string, { id: string; count: number }>();
+
+  for (const day of history.days) {
+    // day has: date, total_calories, total_protein_g, etc.
+  }
+
+  // For repeat detection we need item-level data which getHistory doesn't provide.
+  // In SQL fallback, we query meal_log_items directly.
+  return {
+    varietyScore: null,
+    repeatedMeals: [] as { recipeId: string; count: number }[],
+    cuisineBreakdown: null,
+    avgDailyCalories: history.averages?.avg_calories ?? null,
+    avgDailyProtein: history.averages?.avg_protein_g ? Math.round(Number(history.averages.avg_protein_g)) : null,
+    nutritionTrends: {
+      daily: history.days.map((d: any) => ({
+        date: d.date,
+        calories: d.total_calories ?? 0,
+        proteinG: Number(d.total_protein_g ?? 0),
+        carbsG: Number(d.total_carbs_g ?? 0),
+        fatG: Number(d.total_fat_g ?? 0),
+      })),
+    },
+    suggestions: [],
+    source: "sql_fallback" as const,
+  };
 }

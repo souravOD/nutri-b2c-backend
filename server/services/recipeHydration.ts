@@ -124,3 +124,49 @@ export async function getRecipeIngredients(recipeId: string) {
   );
   return rows as unknown as RecipeIngredientRow[];
 }
+
+export async function hydrateRecipesByIds(ids: string[]) {
+  if (!ids.length) return [];
+
+  const rows = await executeRaw(
+    `
+    SELECT r.*, c.id AS cuisine_id, c.code AS cuisine_code, c.name AS cuisine_name
+    FROM gold.recipes r
+    LEFT JOIN gold.cuisines c ON c.id = r.cuisine_id
+    WHERE r.id = ANY($1::uuid[])
+    `,
+    [ids]
+  );
+
+  // Preserve RAG ranking order
+  const map = new Map((rows as any[]).map((r: any) => [r.id, r]));
+  const nutritionMap = await getRecipeNutritionMap(ids);
+  const allergenMap = await getRecipeAllergenMap(ids);
+
+  return ids
+    .map(id => {
+      const row = map.get(id);
+      if (!row) return null;
+      return {
+        id: row.id,
+        title: row.title,
+        description: row.description,
+        imageUrl: row.image_url,
+        sourceUrl: row.source_url,
+        cuisine: row.cuisine_id
+          ? { id: row.cuisine_id, code: row.cuisine_code, name: row.cuisine_name }
+          : null,
+        mealType: row.meal_type,
+        difficulty: row.difficulty,
+        prepTimeMinutes: row.prep_time_minutes,
+        cookTimeMinutes: row.cook_time_minutes,
+        totalTimeMinutes: row.total_time_minutes,
+        servings: row.servings,
+        nutrition: nutritionMap.get(row.id) ?? {},
+        allergens: allergenMap.get(row.id) ?? [],
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      };
+    })
+    .filter(Boolean);
+}

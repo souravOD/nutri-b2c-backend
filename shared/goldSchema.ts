@@ -672,6 +672,19 @@ export const householdBudgets = gold.table("household_budgets", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
+// ── Chat Sessions (PRD-09 / PRD-16) ─────────────────────────────────────────
+
+export const chatSessions = gold.table("chat_sessions", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  b2cCustomerId: uuid("b2c_customer_id").notNull(),
+  sessionData: jsonb("session_data").notNull().default({}),
+  messageCount: integer("message_count").notNull().default(0),
+  lastIntent: varchar("last_intent", { length: 50 }),
+  createdAt: timestamp("created_at").defaultNow(),
+  lastActivityAt: timestamp("last_activity_at").defaultNow(),
+  expiresAt: timestamp("expires_at"),
+});
+
 // ── Zod Schemas ─────────────────────────────────────────────────────────────
 
 export const insertRecipeSchema = createInsertSchema(recipes).omit({
@@ -711,4 +724,5 @@ export type RecipeRating = typeof recipeRatings.$inferSelect;
 export type ShoppingList = typeof shoppingLists.$inferSelect;
 export type ShoppingListItem = typeof shoppingListItems.$inferSelect;
 export type HouseholdBudget = typeof householdBudgets.$inferSelect;
+export type ChatSession = typeof chatSessions.$inferSelect;
 

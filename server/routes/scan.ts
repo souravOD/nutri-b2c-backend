@@ -7,7 +7,7 @@ import { authMiddleware } from "../middleware/auth.js";
 import { rateLimitMiddleware } from "../middleware/rateLimit.js";
 import { requireB2cCustomerIdFromReq } from "../services/b2cIdentity.js";
 import {
-    lookupProductByBarcode,
+    lookupProductWithAlternatives,
     saveScanHistory,
     getScanHistory,
 } from "../services/scan.js";
@@ -62,7 +62,7 @@ router.post(
             const id = b2cCustomerId(req);
             const body = lookupSchema.parse(req.body ?? {});
 
-            const result = await lookupProductByBarcode(
+            const result = await lookupProductWithAlternatives(
                 body.barcode,
                 id,
                 body.memberId
