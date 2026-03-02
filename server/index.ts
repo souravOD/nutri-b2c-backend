@@ -62,27 +62,32 @@ async function gracefulShutdown(signal: string) {
   isShuttingDown = true;
   console.log(`[shutdown] Received ${signal}. Closing server gracefully...`);
 
-  // Stop accepting new connections and wait for in-flight requests to finish
-  await new Promise<void>((resolve) => {
-    server.close(() => {
-      console.log("[shutdown] HTTP server closed.");
-      resolve();
-    });
-  });
-
-  // Drain DB connections after HTTP server is fully closed
-  try {
-    await queryClient.end({ timeout: 10 });
-    console.log("[shutdown] DB connections drained.");
-  } catch (err) {
-    console.error("[shutdown] Error closing DB connections:", err);
-  }
-
-  // Force exit after 15s if graceful shutdown stalls
-  setTimeout(() => {
+  // Force exit after 15s if graceful shutdown stalls — placed FIRST to bound total time
+  const forceExitTimer = setTimeout(() => {
     console.error("[shutdown] Forceful exit after timeout.");
     process.exit(1);
-  }, 15_000).unref();
+  }, 15_000);
+  forceExitTimer.unref();
+
+  try {
+    // Stop accepting new connections and wait for in-flight requests to finish
+    await new Promise<void>((resolve) => {
+      server.close(() => {
+        console.log("[shutdown] HTTP server closed.");
+        resolve();
+      });
+    });
+
+    // Drain DB connections after HTTP server is fully closed
+    try {
+      await queryClient.end({ timeout: 10 });
+      console.log("[shutdown] DB connections drained.");
+    } catch (err) {
+      console.error("[shutdown] Error closing DB connections:", err);
+    }
+  } finally {
+    clearTimeout(forceExitTimer);
+  }
 }
 
 process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));

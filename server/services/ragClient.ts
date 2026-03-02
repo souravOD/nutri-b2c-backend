@@ -46,6 +46,7 @@ const COOLDOWN_MS = 30_000;      // 30s before HALF_OPEN
 let circuitState: CircuitState = "CLOSED";
 let consecutiveFailures = 0;
 let lastFailureAt: number | null = null;
+let halfOpenProbeInFlight = false;
 
 // ── Internal Helpers ─────────────────────────────────────
 
@@ -61,13 +62,21 @@ function shouldAllowRequest(): boolean {
         // Check cooldown
         if (lastFailureAt && Date.now() - lastFailureAt >= COOLDOWN_MS) {
             circuitState = "HALF_OPEN";
+            halfOpenProbeInFlight = false;
             console.log("[RAG] Circuit → HALF_OPEN (cooldown expired, allowing test request)");
-            return true;
+            // fall through to HALF_OPEN check below
+        } else {
+            return false;
         }
-        return false;
     }
 
     // HALF_OPEN: allow exactly one test request
+    if (circuitState === "HALF_OPEN") {
+        if (halfOpenProbeInFlight) return false;
+        halfOpenProbeInFlight = true;
+        return true;
+    }
+
     return true;
 }
 
@@ -77,11 +86,13 @@ function recordSuccess(): void {
     }
     circuitState = "CLOSED";
     consecutiveFailures = 0;
+    halfOpenProbeInFlight = false;
 }
 
 function recordFailure(): void {
     consecutiveFailures++;
     lastFailureAt = Date.now();
+    halfOpenProbeInFlight = false;
 
     if (consecutiveFailures >= FAILURE_THRESHOLD && circuitState !== "OPEN") {
         circuitState = "OPEN";
