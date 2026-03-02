@@ -81,6 +81,42 @@ export async function getRecipeNutritionMap(recipeIds: string[]) {
       saturated_fat_g: row.saturated_fat_g ?? null,
     });
   }
+
+  // Fallback: for any recipes not found in nutrition_facts,
+  // try recipe_nutrition_profiles table
+  const missingIds = recipeIds.filter((id) => !map.has(id));
+  if (missingIds.length > 0) {
+    const fallbackRows = await executeRaw(
+      `
+      SELECT
+        recipe_id,
+        calories,
+        protein_g,
+        total_carbs_g  AS carbs_g,
+        total_fat_g    AS fat_g,
+        dietary_fiber_g AS fiber_g,
+        total_sugars_g AS sugar_g,
+        sodium_mg,
+        saturated_fat_g
+      FROM gold.recipe_nutrition_profiles
+      WHERE recipe_id = ANY($1::uuid[])
+      `,
+      [missingIds]
+    );
+    for (const row of fallbackRows as any[]) {
+      map.set(row.recipe_id, {
+        calories: row.calories ?? null,
+        protein_g: row.protein_g ?? null,
+        carbs_g: row.carbs_g ?? null,
+        fat_g: row.fat_g ?? null,
+        fiber_g: row.fiber_g ?? null,
+        sugar_g: row.sugar_g ?? null,
+        sodium_mg: row.sodium_mg ?? null,
+        saturated_fat_g: row.saturated_fat_g ?? null,
+      });
+    }
+  }
+
   return map;
 }
 
@@ -123,4 +159,50 @@ export async function getRecipeIngredients(recipeId: string) {
     [recipeId]
   );
   return rows as unknown as RecipeIngredientRow[];
+}
+
+export async function hydrateRecipesByIds(ids: string[]) {
+  if (!ids.length) return [];
+
+  const rows = await executeRaw(
+    `
+    SELECT r.*, c.id AS cuisine_id, c.code AS cuisine_code, c.name AS cuisine_name
+    FROM gold.recipes r
+    LEFT JOIN gold.cuisines c ON c.id = r.cuisine_id
+    WHERE r.id = ANY($1::uuid[])
+    `,
+    [ids]
+  );
+
+  // Preserve RAG ranking order
+  const map = new Map((rows as any[]).map((r: any) => [r.id, r]));
+  const nutritionMap = await getRecipeNutritionMap(ids);
+  const allergenMap = await getRecipeAllergenMap(ids);
+
+  return ids
+    .map(id => {
+      const row = map.get(id);
+      if (!row) return null;
+      return {
+        id: row.id,
+        title: row.title,
+        description: row.description,
+        imageUrl: row.image_url,
+        sourceUrl: row.source_url,
+        cuisine: row.cuisine_id
+          ? { id: row.cuisine_id, code: row.cuisine_code, name: row.cuisine_name }
+          : null,
+        mealType: row.meal_type,
+        difficulty: row.difficulty,
+        prepTimeMinutes: row.prep_time_minutes,
+        cookTimeMinutes: row.cook_time_minutes,
+        totalTimeMinutes: row.total_time_minutes,
+        servings: row.servings,
+        nutrition: nutritionMap.get(row.id) ?? {},
+        allergens: allergenMap.get(row.id) ?? [],
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      };
+    })
+    .filter(Boolean);
 }

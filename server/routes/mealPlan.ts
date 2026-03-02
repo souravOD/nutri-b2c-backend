@@ -40,6 +40,7 @@ const generateSchema = z.object({
       maxCookTime: z.number().int().positive().optional(),
       cuisines: z.array(z.string()).optional(),
       excludeRecipeIds: z.array(z.string().uuid()).optional(),
+      prompt: z.string().max(1000).optional(),
     })
     .optional(),
 });

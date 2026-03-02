@@ -8,6 +8,7 @@ import { eq, and } from "drizzle-orm";
 import { fetchFromOpenFoodFacts } from "./openfoodfacts.js";
 import type { NormalizedProduct } from "./openfoodfacts.js";
 import type { GoldProduct } from "../../shared/goldSchema.js";
+import { ragAlternatives } from "./ragClient.js";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -51,6 +52,17 @@ export interface ScanLookupResult {
     allergenWarnings: AllergenWarning[];
     healthWarnings: HealthWarning[];
     source: "cache" | "openfoodfacts" | "not_found";
+}
+
+export interface ProductAlternative {
+    productId: string;
+    name: string;
+    brand: string | null;
+    price: number | null;
+    imageUrl: string | null;
+    reason: string | null;
+    savings: number | null;
+    allergenSafe: boolean;
 }
 
 // ─── Product Lookup ─────────────────────────────────────────────────────────
@@ -309,6 +321,32 @@ async function getProductAllergenNames(productId: string): Promise<string[]> {
     }
 }
 
+// ─── Diet Tag Extraction ────────────────────────────────────────────────────
+
+const DIET_TAG_MAP: Record<string, string> = {
+    "en:vegan": "Vegan",
+    "en:vegetarian": "Vegetarian",
+    "en:gluten-free": "Gluten-Free",
+    "en:palm-oil-free": "Palm Oil Free",
+    "en:low-salt": "Low Sodium",
+    "en:no-lactose": "Lactose-Free",
+    "en:organic": "Organic",
+    "en:no-added-sugar": "No Added Sugar",
+    "en:keto": "Keto",
+};
+
+/**
+ * Extract diet compatibility tags from cached OpenFoodFacts vendor_specific_attrs.
+ */
+function extractDietTags(p: GoldProduct): string[] {
+    const attrs = p.vendorSpecificAttrs as Record<string, unknown> | null;
+    const tags = attrs?.tags;
+    if (!Array.isArray(tags)) return [];
+    return tags
+        .filter((t): t is string => typeof t === "string" && t in DIET_TAG_MAP)
+        .map((t) => DIET_TAG_MAP[t]);
+}
+
 /**
  * Format a DB product row into the API response shape.
  */
@@ -320,17 +358,18 @@ function formatProductResponse(p: GoldProduct, allergenNames: string[]) {
         brand: p.brand,
         imageUrl: p.imageUrl,
         allergens: allergenNames,
+        dietTags: extractDietTags(p),
         nutrition: {
-            calories: p.calories ? Number(p.calories) : null,
-            protein_g: p.proteinG ? Number(p.proteinG) : null,
-            carbs_g: p.totalCarbsG ? Number(p.totalCarbsG) : null,
-            fat_g: p.totalFatG ? Number(p.totalFatG) : null,
-            fiber_g: p.dietaryFiberG ? Number(p.dietaryFiberG) : null,
-            sugar_g: p.totalSugarsG ? Number(p.totalSugarsG) : null,
-            sodium_mg: p.sodiumMg ? Number(p.sodiumMg) : null,
-            saturatedFat: p.saturatedFatG ? Number(p.saturatedFatG) : null,
-            transFat: p.transFatG ? Number(p.transFatG) : null,
-            cholesterol: p.cholesterolMg ? Number(p.cholesterolMg) : null,
+            calories: p.calories != null ? Number(p.calories) : null,
+            protein_g: p.proteinG != null ? Number(p.proteinG) : null,
+            carbs_g: p.totalCarbsG != null ? Number(p.totalCarbsG) : null,
+            fat_g: p.totalFatG != null ? Number(p.totalFatG) : null,
+            fiber_g: p.dietaryFiberG != null ? Number(p.dietaryFiberG) : null,
+            sugar_g: p.totalSugarsG != null ? Number(p.totalSugarsG) : null,
+            sodium_mg: p.sodiumMg != null ? Number(p.sodiumMg) : null,
+            saturatedFat: p.saturatedFatG != null ? Number(p.saturatedFatG) : null,
+            transFat: p.transFatG != null ? Number(p.transFatG) : null,
+            cholesterol: p.cholesterolMg != null ? Number(p.cholesterolMg) : null,
         },
         servingSize: p.servingSize,
         ingredientText: p.description, // ingredient text stored in description
@@ -404,12 +443,12 @@ async function generateHealthWarnings(
         if (!memberConditions.length) return [];
 
         const warnings: HealthWarning[] = [];
-        const sodium = product.sodiumMg ? Number(product.sodiumMg) : null;
-        const sugar = product.totalSugarsG ? Number(product.totalSugarsG) : null;
-        const satFat = product.saturatedFatG
+        const sodium = product.sodiumMg != null ? Number(product.sodiumMg) : null;
+        const sugar = product.totalSugarsG != null ? Number(product.totalSugarsG) : null;
+        const satFat = product.saturatedFatG != null
             ? Number(product.saturatedFatG)
             : null;
-        const cholesterol = product.cholesterolMg
+        const cholesterol = product.cholesterolMg != null
             ? Number(product.cholesterolMg)
             : null;
 
@@ -563,3 +602,43 @@ export async function getScanHistory(
         total: countResult[0]?.total ?? 0,
     };
 }
+
+// ── Graph-Enhanced Scanner Alternatives (PRD-14) ────────────────────────────
+
+async function getMemberAllergenIds(memberId: string): Promise<string[]> {
+    const rows = (await executeRaw(
+        `SELECT allergen_id FROM gold.b2c_customer_allergens WHERE b2c_customer_id = $1 AND is_active = true`,
+        [memberId]
+    )) as any[];
+    return rows.map(r => r.allergen_id);
+}
+
+export async function lookupProductWithAlternatives(
+    barcode: string,
+    b2cCustomerId: string,
+    memberId?: string
+): Promise<ScanLookupResult & { alternatives: ProductAlternative[] }> {
+    const scanResult = await lookupProductByBarcode(barcode, b2cCustomerId, memberId);
+
+    let alternatives: ProductAlternative[] = [];
+    if (scanResult.product && scanResult.source !== "not_found") {
+        const allergenIds = await getMemberAllergenIds(memberId || b2cCustomerId);
+        const graphAlts = await ragAlternatives(scanResult.product.id, allergenIds);
+
+        if (graphAlts && graphAlts.alternatives.length > 0) {
+            alternatives = graphAlts.alternatives.map((alt: any) => ({
+                productId: alt.product_id,
+                name: alt.name,
+                brand: alt.brand ?? null,
+                price: alt.price ?? null,
+                imageUrl: alt.image_url ?? null,
+                reason: alt.reason ?? null,
+                savings: alt.savings ?? null,
+                allergenSafe: alt.allergen_safe ?? false,
+            }));
+        }
+    }
+
+    return { ...scanResult, alternatives };
+}
+

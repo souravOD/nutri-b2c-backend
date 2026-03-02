@@ -7,7 +7,8 @@ import {
   resolveConditionIds,
   resolveCuisineIds,
 } from "./b2cTaxonomy.js";
-import { getRecipeAllergenMap, getRecipeNutritionMap, getRecipeIngredients } from "./recipeHydration.js";
+import { getRecipeAllergenMap, getRecipeNutritionMap, getRecipeIngredients, hydrateRecipesByIds } from "./recipeHydration.js";
+import { ragSearch } from "./ragClient.js";
 
 export interface SearchParams {
   q?: string;
@@ -287,4 +288,46 @@ export async function getPopularRecipes(limit: number = 20): Promise<any[]> {
     console.error("Popular recipes error:", error);
     throw new Error("Failed to fetch popular recipes");
   }
+}
+
+// ── Graph-Enhanced Search (PRD-10) ──────────────────────────────────────────
+
+export async function searchRecipesWithRAG(
+  params: SearchParams,
+  b2cCustomerId?: string
+): Promise<SearchResult[]> {
+  // Strategy:
+  // - NL query (params.q) → try RAG first for semantic+structural search
+  // - Filter-only (no free text) → always SQL (faster for indexed columns)
+  // - RAG returns null → silent fallback to SQL
+
+  if (params.q) {
+    const ragResult = await ragSearch({
+      query: params.q,
+      filters: {
+        diets: params.diets,
+        cuisines: params.cuisines,
+        allergensExclude: params.allergensExclude,
+        proteinMin: params.proteinMin,
+        calMax: params.calMax,
+        timeMax: params.timeMax,
+      },
+      customer_id: b2cCustomerId,
+    });
+
+    if (ragResult && ragResult.results.length > 0) {
+      // RAG returned results — hydrate with full recipe data from PG
+      const ids = ragResult.results.map(r => r.id);
+      const hydrated = await hydrateRecipesByIds(ids);
+      return hydrated.map((recipe, i) => ({
+        recipe,
+        score: ragResult.results[i]?.score ?? 0,
+        reasons: ragResult.results[i]?.reasons ?? [],
+      }));
+    }
+    // ragResult is null or empty → fall through to SQL
+  }
+
+  // SQL fallback (or filter-only search)
+  return searchRecipes(params);
 }

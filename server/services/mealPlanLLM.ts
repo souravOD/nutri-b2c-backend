@@ -138,6 +138,8 @@ export interface RecipeOption {
   cookTimeMinutes: number | null;
   allergens: string[];
   diets: string[];
+  graphScore?: number;
+  graphReasons?: string[];
 }
 
 export interface PlanGenerationContext {
@@ -255,6 +257,7 @@ export async function generateMealPlanWithLLM(
   }));
 
   const maxRecipes = parseInt(process.env.MEAL_PLAN_MAX_RECIPES || "150", 10);
+  const hasGraphScores = context.recipes.some(r => r.graphScore != null);
   const recipeSummary = context.recipes.slice(0, maxRecipes).map((r) => ({
     id: r.id,
     title: r.title,
@@ -267,7 +270,15 @@ export async function generateMealPlanWithLLM(
     cookTime: r.cookTimeMinutes,
     allergens: r.allergens,
     diets: r.diets,
+    ...(r.graphScore != null ? { graph_score: r.graphScore, graph_reasons: r.graphReasons } : {}),
   }));
+
+  // PRD-12: Add graph context to prompt when graph-scored candidates are available
+  const graphInstruction = hasGraphScores
+    ? `\nIMPORTANT: Each recipe has a graph_score (0-1) and graph_reasons explaining why it's recommended for this user.
+Prefer higher-scored recipes. The scores already account for dietary compliance, nutritional gaps, and variety.
+Only deviate from scores if needed for meal type diversity or to avoid same-day repeats.\n`
+    : "";
 
   const userPrompt = `Generate a meal plan with these constraints:
 
@@ -280,7 +291,7 @@ ${context.budgetAmount ? `BUDGET: ${context.budgetAmount} ${context.budgetCurren
 ${context.maxCookTime ? `MAX COOK TIME: ${context.maxCookTime} minutes per meal` : ""}
 ${context.preferredCuisines?.length ? `PREFERRED CUISINES: ${context.preferredCuisines.join(", ")}` : ""}
 ${context.excludeRecipeIds.length ? `EXCLUDED RECIPE IDS (do NOT use these): ${context.excludeRecipeIds.join(", ")}` : ""}
-
+${graphInstruction}
 AVAILABLE RECIPES (pick ONLY from these):
 ${JSON.stringify(recipeSummary, null, 2)}`;
 
@@ -389,15 +400,15 @@ ${JSON.stringify(context.members, null, 2)}
 
 AVAILABLE ALTERNATIVES (pick from these):
 ${JSON.stringify(context.alternatives.map((a) => ({
-  id: a.id,
-  title: a.title,
-  calories: a.calories,
-  proteinG: a.proteinG,
-  carbsG: a.carbsG,
-  fatG: a.fatG,
-  cookTime: a.cookTimeMinutes,
-  allergens: a.allergens,
-})), null, 2)}`;
+    id: a.id,
+    title: a.title,
+    calories: a.calories,
+    proteinG: a.proteinG,
+    carbsG: a.carbsG,
+    fatG: a.fatG,
+    cookTime: a.cookTimeMinutes,
+    allergens: a.allergens,
+  })), null, 2)}`;
 
   try {
     const response = await withTimeout(

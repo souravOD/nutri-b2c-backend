@@ -24,6 +24,7 @@ import {
 } from "./mealPlanLLM.js";
 import { addMealItem } from "./mealLog.js";
 import { resolveCuisineIds } from "./b2cTaxonomy.js";
+import { ragMealCandidates } from "./ragClient.js";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -38,6 +39,7 @@ export interface GeneratePlanInput {
     maxCookTime?: number;
     cuisines?: string[];
     excludeRecipeIds?: string[];
+    prompt?: string;
   };
 }
 
@@ -205,6 +207,53 @@ async function fetchRecipeCatalog(params: {
   }));
 }
 
+// ── Graph-Scored Recipe Candidates (PRD-12) ─────────────────────────────────
+
+async function getRecipeCandidates(
+  b2cCustomerId: string,
+  members: MemberContext[],
+  params: { cuisineIds?: string[]; maxCookTime?: number; excludeIds: string[]; limit: number }
+): Promise<RecipeOption[]> {
+  // Try RAG-scored candidates first
+  const graphCandidates = await ragMealCandidates({
+    customer_id: b2cCustomerId,
+    members: members.map((m, i) => ({
+      id: `member-${i}`,
+      allergen_ids: m.allergens,
+      diet_ids: m.diets,
+      health_profile: {
+        calorie_target: m.calorieTarget,
+        protein_target_g: m.proteinTargetG,
+      },
+    })),
+    meal_history: params.excludeIds,
+    date_range: { start: new Date().toISOString().slice(0, 10), end: new Date().toISOString().slice(0, 10) },
+    meals_per_day: ["breakfast", "lunch", "dinner"],
+    limit: params.limit,
+  });
+
+  if (graphCandidates && graphCandidates.candidates.length > 0) {
+    return graphCandidates.candidates.map((c: any) => ({
+      id: c.recipe_id,
+      title: c.title,
+      mealType: c.meal_type ?? null,
+      cuisine: c.cuisine ?? null,
+      calories: c.calories ?? 0,
+      proteinG: c.protein_g ?? 0,
+      carbsG: c.carbs_g ?? 0,
+      fatG: c.fat_g ?? 0,
+      cookTimeMinutes: c.cook_time_minutes ?? null,
+      allergens: c.allergens ?? [],
+      diets: c.diets ?? [],
+      graphScore: c.score,
+      graphReasons: c.reasons,
+    }));
+  }
+
+  // SQL fallback — existing fetchRecipeCatalog()
+  return fetchRecipeCatalog(params);
+}
+
 // ── Get Nutrition for Recipe ────────────────────────────────────────────────
 
 async function getRecipeNutrition(recipeId: string): Promise<NutritionSnapshot> {
@@ -275,7 +324,7 @@ export async function generateMealPlan(
     ? await resolveCuisineIds(preferredCuisines)
     : [];
 
-  let recipeCatalog = await fetchRecipeCatalog({
+  let recipeCatalog = await getRecipeCandidates(b2cCustomerId, members, {
     cuisineIds,
     maxCookTime: input.preferences?.maxCookTime,
     excludeIds: allExcluded,
@@ -285,7 +334,7 @@ export async function generateMealPlan(
 
   // Soft preference mode: if preferred cuisines produce no matches, fall back.
   if (preferredCuisines.length > 0 && recipeCatalog.length === 0) {
-    recipeCatalog = await fetchRecipeCatalog({
+    recipeCatalog = await getRecipeCandidates(b2cCustomerId, members, {
       maxCookTime: input.preferences?.maxCookTime,
       excludeIds: allExcluded,
       limit: maxRecipes,
@@ -364,6 +413,7 @@ export async function generateMealPlan(
     .insert(mealPlans)
     .values({
       householdId: household.id,
+      b2cCustomerId,
       planName: `Meal Plan ${input.startDate} to ${input.endDate}`,
       startDate: input.startDate,
       endDate: input.endDate,
@@ -583,7 +633,7 @@ export async function swapMeal(
     });
   }
 
-  const alternatives = await fetchRecipeCatalog({
+  const alternatives = await getRecipeCandidates(b2cCustomerId, members, {
     maxCookTime: undefined,
     excludeIds,
     limit: 30,

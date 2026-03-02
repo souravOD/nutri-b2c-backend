@@ -3,7 +3,7 @@ import type { Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { authMiddleware } from "../middleware/auth.js";
 import { rateLimitMiddleware } from "../middleware/rateLimit.js";
-import { searchRecipes, getRecipeDetail, getPopularRecipes } from "../services/search.js";
+import { searchRecipes, searchRecipesWithRAG, getRecipeDetail, getPopularRecipes } from "../services/search.js";
 import { toggleSaveRecipe } from "../services/recipes.js";
 import { requireB2cCustomerIdFromReq } from "../services/b2cIdentity.js";
 import {
@@ -44,8 +44,10 @@ router.get("/", rateLimitMiddleware, async (req, res, next) => {
       limit: req.query.limit ? parseInt(req.query.limit as string) : 50,
       offset: req.query.offset ? parseInt(req.query.offset as string) : 0,
     };
-    
-    const results = await searchRecipes(searchParams);
+
+    // PRD-10: Use graph-enhanced search (RAG → SQL fallback)
+    const b2cCustomerId = (req as any).user?.b2cCustomerId as string | undefined;
+    const results = await searchRecipesWithRAG(searchParams, b2cCustomerId);
     res.json(results);
   } catch (error) {
     next(error);
@@ -85,6 +87,18 @@ router.post("/:id/save", authMiddleware, rateLimitMiddleware, async (req, res, n
 router.post("/:id/report", authMiddleware, rateLimitMiddleware, async (req, res, next) => {
   try {
     res.status(501).json({ error: "Recipe reporting is not supported in the gold schema." });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// PRD-23: Mark recipe as "Not for me"
+router.post("/:id/reject", authMiddleware, rateLimitMiddleware, async (req, res, next) => {
+  try {
+    const b2cCustomerId = requireB2cCustomerIdFromReq(req);
+    const { rejectRecipe } = await import("../services/recipes.js");
+    const result = await rejectRecipe(b2cCustomerId, req.params.id);
+    res.json(result);
   } catch (error) {
     next(error);
   }

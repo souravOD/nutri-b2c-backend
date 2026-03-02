@@ -3,14 +3,15 @@ import { authMiddleware } from "../middleware/auth.js";
 import { rateLimitMiddleware } from "../middleware/rateLimit.js";
 import { auditedRoute } from "../middleware/audit.js";
 import { setCurrentUser } from "../config/database.js";
-import { 
-  createCuratedRecipe, 
-  updateCuratedRecipe, 
+import {
+  createCuratedRecipe,
+  updateCuratedRecipe,
   deleteCuratedRecipe,
   getAuditLog,
   getDashboardStats
 } from "../services/admin.js";
 import { insertRecipeSchema } from "../../shared/goldSchema.js";
+import { getCircuitStatus } from "../services/ragClient.js";
 
 const router = Router();
 
@@ -108,7 +109,7 @@ router.delete("/recipes/:id", auditedRoute(async (req, res, next) => {
         instance: req.url
       });
     }
-    
+
     const result = await deleteCuratedRecipe(requireAdminUserId(req), req.params.id, reason);
     res.json(result);
   } catch (error) {
@@ -156,7 +157,7 @@ router.get("/audit", async (req, res, next) => {
     const limit = req.query.limit ? parseInt(req.query.limit as string) : 100;
     const offset = req.query.offset ? parseInt(req.query.offset as string) : 0;
     const actorUserId = req.query.actor_user_id as string;
-    
+
     const logs = await getAuditLog(limit, offset, actorUserId);
     res.json(logs);
   } catch (error) {
@@ -172,5 +173,14 @@ router.post("/refresh-materialized-views", auditedRoute(async (req, res, next) =
     next(error);
   }
 }));
+
+// RAG circuit breaker diagnostics (PRD-09)
+router.get("/rag-status", async (req, res, next) => {
+  try {
+    res.json(getCircuitStatus());
+  } catch (error) {
+    next(error);
+  }
+});
 
 export default router;

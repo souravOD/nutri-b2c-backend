@@ -7,6 +7,7 @@ import {
 } from "../../shared/goldSchema.js";
 import { getOrCreateHousehold } from "./household.js";
 import { canTransitionGroceryListStatus } from "./groceryListUtils.js";
+import { ragProducts, ragAlternatives } from "./ragClient.js";
 
 export interface GenerateGroceryListInput {
   mealPlanId?: string;
@@ -289,6 +290,43 @@ async function fetchIngredientMappedCandidates(ingredientIds: string[]): Promise
   return map;
 }
 
+// ── Graph-Enhanced Product Matching (PRD-13) ──────────────────────────────────
+
+async function getHouseholdAllergenIds(householdId: string): Promise<string[]> {
+  const rows = (await executeRaw(
+    `SELECT DISTINCT a.id FROM gold.b2c_customer_allergens bca
+     JOIN gold.b2c_customers bc ON bc.id = bca.b2c_customer_id
+     JOIN gold.allergens a ON a.id = bca.allergen_id
+     WHERE bc.household_id = $1`,
+    [householdId]
+  )) as any[];
+  return rows.map(r => r.id);
+}
+
+async function matchProductsWithRAG(
+  ingredientIds: string[],
+  allergenIds: string[]
+): Promise<Map<string, ProductCandidate> | null> {
+  const result = await ragProducts(ingredientIds, allergenIds);
+  if (!result || !result.products?.length) return null;
+
+  const map = new Map<string, ProductCandidate>();
+  for (const raw of result.products) {
+    const p = raw as any;
+    map.set(p.ingredient_id, {
+      id: p.product_id,
+      name: p.product_name ?? "",
+      brand: p.brand ?? null,
+      price: p.price ?? null,
+      currency: p.currency ?? "USD",
+      package_weight_g: p.weight_g ?? null,
+      category_name: p.category ?? null,
+      image_url: p.image_url ?? null,
+    });
+  }
+  return map;
+}
+
 function chooseCheapestUsd(candidates: ProductCandidate[]): ProductCandidate | null {
   const usable = candidates.filter((c) => c.currency === "USD" && c.price != null);
   if (usable.length === 0) return null;
@@ -435,6 +473,10 @@ export async function generateGroceryList(
     fetchIngredientMappedCandidates(ingredientIds),
   ]);
 
+  // PRD-13: Try graph-aware allergen-safe product matching
+  const allergenIds = await getHouseholdAllergenIds(household.id);
+  const graphProductMap = await matchProductsWithRAG(ingredientIds, allergenIds);
+
   let pricedItems = 0;
   let skippedByCurrency = 0;
 
@@ -445,7 +487,7 @@ export async function generateGroceryList(
 
     const ingredientCandidates = ingredientMap.get(bucket.ingredientId) ?? [];
 
-    const selected = chooseCheapestUsd(linkedCandidates) || chooseCheapestUsd(ingredientCandidates);
+    const selected = graphProductMap?.get(bucket.ingredientId) ?? chooseCheapestUsd(linkedCandidates) ?? chooseCheapestUsd(ingredientCandidates);
 
     if (!selected) {
       const hasNonUsd = [...linkedCandidates, ...ingredientCandidates].some((c) => c.currency !== "USD");
@@ -767,6 +809,31 @@ export async function getGroceryItemSubstitutions(
     ? ((await executeRaw(`SELECT price, currency FROM gold.products WHERE id = $1 LIMIT 1`, [currentProductId])) as any[])
     : [];
   const currentPrice = currentPriceRows[0]?.currency === "USD" ? n(currentPriceRows[0]?.price) : null;
+
+  // PRD-13: Try graph-based substitutions first
+  if (currentProductId) {
+    const allergenIds = await getHouseholdAllergenIds(household.id);
+    const graphSubs = await ragAlternatives(currentProductId, allergenIds);
+
+    if (graphSubs && graphSubs.alternatives.length > 0) {
+      return {
+        substitutions: graphSubs.alternatives.map((alt: any) => ({
+          productId: alt.product_id,
+          name: alt.name,
+          brand: alt.brand ?? null,
+          price: alt.price ?? null,
+          currency: alt.currency ?? "USD",
+          category: alt.category ?? null,
+          imageUrl: alt.image_url ?? null,
+          substitutionReason: alt.reason ?? null,
+          confidenceScore: alt.confidence ?? null,
+          savingsVsCurrent: alt.savings ?? null,
+        })),
+      };
+    }
+  }
+
+  // SQL fallback (existing logic)
 
   let rows: any[] = [];
 

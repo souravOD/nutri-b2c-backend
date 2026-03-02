@@ -1,5 +1,6 @@
 import { executeRaw } from "../config/database.js";
-import { getRecipeAllergenMap, getRecipeNutritionMap } from "./recipeHydration.js";
+import { getRecipeAllergenMap, getRecipeNutritionMap, hydrateRecipesByIds } from "./recipeHydration.js";
+import { ragFeed } from "./ragClient.js";
 
 export interface FeedResult {
   recipe: any;
@@ -232,6 +233,113 @@ export async function getFeedRecommendations(b2cCustomerId: string): Promise<{
     };
   } catch (error) {
     console.error("Feed recommendations error:", error);
+    throw new Error("Failed to get feed recommendations");
+  }
+}
+
+// ── Graph-Enhanced Feed (PRD-11) ────────────────────────────────────────────
+
+// Cold-start optimization (PRD-17): skip RAG for brand-new users
+async function getUserInteractionCount(userId: string): Promise<number> {
+  const result = await executeRaw(
+    `SELECT COUNT(*)::int AS cnt FROM gold.customer_product_interactions
+     WHERE b2c_customer_id = $1`,
+    [userId]
+  );
+  return (result as any[])[0]?.cnt ?? 0;
+}
+
+export async function getPersonalizedFeedWithRAG(
+  b2cCustomerId: string,
+  limit: number = 200,
+  offset: number = 0
+): Promise<FeedResult[]> {
+  // PRD-17: skip RAG for zero-interaction users (collaborative filtering has no signal)
+  const interactions = await getUserInteractionCount(b2cCustomerId);
+  if (interactions === 0) {
+    return getPersonalizedFeed(b2cCustomerId, limit, offset);
+  }
+
+  // Try graph-powered personalization first
+  const prefs = await getUserPrefs(b2cCustomerId);
+  const graphFeed = await ragFeed(b2cCustomerId, prefs);
+
+  if (graphFeed && graphFeed.results.length > 0) {
+    // Graph returned scored + explained results — hydrate from PG
+    const ids = graphFeed.results.map(r => r.id);
+    const hydrated = await hydrateRecipesByIds(ids);
+    const nutritionMap = await getRecipeNutritionMap(ids);
+    const allergenMap = await getRecipeAllergenMap(ids);
+
+    return hydrated.map((recipe, i) => ({
+      recipe: mapFeedRecipe(recipe, nutritionMap, allergenMap),
+      score: graphFeed.results[i]?.score ?? 0,
+      reasons: graphFeed.results[i]?.reasons ?? [],
+    }));
+  }
+
+  // SQL fallback — existing logic (popularity + recency)
+  return getPersonalizedFeed(b2cCustomerId, limit, offset);
+}
+
+export async function getFeedRecommendationsWithRAG(b2cCustomerId: string): Promise<{
+  trending: any[];
+  forYou: FeedResult[];
+  recent: any[];
+}> {
+  try {
+    // Trending: always SQL (not personalized)
+    const trendingRows = await executeRaw(
+      `
+      select
+        r.*,
+        c.id as cuisine_id,
+        c.code as cuisine_code,
+        c.name as cuisine_name,
+        coalesce(p.saved_7d, 0) as saved_7d
+      from gold.recipes r
+      left join gold.cuisines c on c.id = r.cuisine_id
+      left join lateral (
+        select count(*)::int as saved_7d
+        from gold.customer_product_interactions cpi
+        where cpi.recipe_id = r.id
+          and cpi.entity_type = 'recipe'
+          and cpi.interaction_type = 'saved'
+          and cpi.interaction_timestamp > now() - interval '7 days'
+      ) p on true
+      order by saved_7d desc nulls last, r.updated_at desc
+      limit 10
+      `
+    );
+
+    // Recent: always SQL
+    const recentRows = await executeRaw(
+      `
+      select
+        r.*,
+        c.id as cuisine_id,
+        c.code as cuisine_code,
+        c.name as cuisine_name
+      from gold.recipes r
+      left join gold.cuisines c on c.id = r.cuisine_id
+      order by r.updated_at desc nulls last
+      limit 10
+      `
+    );
+
+    const ids = [...trendingRows, ...recentRows].map((r: any) => r.id);
+    const nutritionMap = await getRecipeNutritionMap(ids);
+    const allergenMap = await getRecipeAllergenMap(ids);
+
+    const trending = trendingRows.map((row: any) => mapFeedRecipe(row, nutritionMap, allergenMap));
+    const recent = recentRows.map((row: any) => mapFeedRecipe(row, nutritionMap, allergenMap));
+
+    // ForYou: graph-enhanced (RAG → SQL fallback)
+    const forYou = await getPersonalizedFeedWithRAG(b2cCustomerId, 20);
+
+    return { trending, forYou, recent };
+  } catch (error) {
+    console.error("Feed recommendations (RAG) error:", error);
     throw new Error("Failed to get feed recommendations");
   }
 }

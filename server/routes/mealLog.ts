@@ -17,6 +17,7 @@ import {
   logFromCooking,
   getTemplates,
   createTemplate,
+  getMealPatterns,
 } from "../services/mealLog.js";
 
 const router = Router();
@@ -291,6 +292,23 @@ router.post(
       const parsed = templateSchema.parse(req.body);
       const template = await createTemplate(customerId, parsed);
       res.status(201).json({ template });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// GET /api/v1/meal-log/patterns?days=14&memberId=xxx (PRD-15)
+router.get(
+  "/patterns",
+  rateLimitMiddleware,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const customerId = b2cId(req);
+      const days = parseInt(req.query.days as string) || 14;
+      const { memberId } = memberQuerySchema.parse(req.query ?? {});
+      const patterns = await getMealPatterns(customerId, days, memberId);
+      res.json(patterns);
     } catch (err) {
       next(err);
     }

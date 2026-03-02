@@ -8,9 +8,11 @@ import {
   resolveDietIds,
   resolveAllergenIds,
   resolveConditionIds,
+  resolveCuisineIds,
   replaceCustomerDiets,
   replaceCustomerAllergens,
   replaceCustomerConditions,
+  replaceCustomerCuisines,
 } from "../services/b2cTaxonomy.js";
 import { db, executeRaw } from "../config/database.js";
 import {
@@ -19,6 +21,7 @@ import {
   b2cCustomerDietaryPreferences,
   b2cCustomerAllergens,
   b2cCustomerHealthConditions,
+  b2cCustomerSettings,
 } from "../../shared/goldSchema.js";
 import { eq } from "drizzle-orm";
 import {
@@ -84,6 +87,8 @@ const healthSchema = z.object({
   dislikedIngredients: z.array(z.string()).optional(),
   onboardingComplete: z.boolean().optional(),
   conditions: z.array(z.string()).optional(),
+  allergens: z.array(z.string()).optional(),
+  diets: z.array(z.string()).optional(),
   dateOfBirth: z.string().optional().nullable(),
   gender: z.string().optional().nullable(),
 });
@@ -191,11 +196,19 @@ router.get("/health", authMiddleware, rateLimitMiddleware, async (req, res, next
       `
       select
         hp.*,
-        array_remove(array_agg(distinct hc.code), null) as conditions
+        array_remove(array_agg(distinct hc.code), null) as conditions,
+        array_remove(array_agg(distinct a.code), null) as allergens,
+        array_remove(array_agg(distinct dp.code), null) as diets
       from gold.b2c_customer_health_profiles hp
       left join gold.b2c_customer_health_conditions chc
         on hp.b2c_customer_id = chc.b2c_customer_id and chc.is_active = true
       left join gold.health_conditions hc on hc.id = chc.condition_id
+      left join gold.b2c_customer_allergens ca
+        on hp.b2c_customer_id = ca.b2c_customer_id and ca.is_active = true
+      left join gold.allergens a on a.id = ca.allergen_id
+      left join gold.b2c_customer_dietary_preferences cdp
+        on hp.b2c_customer_id = cdp.b2c_customer_id and cdp.is_active = true
+      left join gold.dietary_preferences dp on dp.id = cdp.diet_id
       where hp.b2c_customer_id = $1
       group by hp.id
       `,
@@ -224,6 +237,8 @@ router.get("/health", authMiddleware, rateLimitMiddleware, async (req, res, next
       dislikedIngredients: row.disliked_ingredients ?? [],
       onboardingComplete: row.onboarding_complete ?? false,
       conditions: row.conditions ?? [],
+      allergens: row.allergens ?? [],
+      diets: row.diets ?? [],
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     });
@@ -289,6 +304,14 @@ router.patch("/health", authMiddleware, rateLimitMiddleware, async (req, res, ne
     if (body.conditions) {
       const conditionIds = await resolveConditionIds(body.conditions);
       await replaceCustomerConditions(id, conditionIds);
+    }
+    if (body.allergens) {
+      const allergenIds = await resolveAllergenIds(body.allergens);
+      await replaceCustomerAllergens(id, allergenIds);
+    }
+    if (body.diets) {
+      const dietIds = await resolveDietIds(body.diets);
+      await replaceCustomerDiets(id, dietIds);
     }
 
     // Write-back to Appwrite to keep both stores in sync
@@ -455,7 +478,224 @@ router.delete("/account", authMiddleware, rateLimitMiddleware, async (req, res, 
 
     res.status(204).end();
   } catch (err) {
-    try { await executeRaw("ROLLBACK"); } catch {}
+    try { await executeRaw("ROLLBACK"); } catch { }
+    next(err);
+  }
+});
+
+// ── Settings (unified GET/PATCH for all settings tabs) ─────────────────────
+
+const settingsSchema = z.object({
+  // General
+  units: z.string().optional(),
+  preferredCuisines: z.array(z.string()).optional(),
+  dislikedIngredients: z.array(z.string()).optional(),
+  timeRangeMin: z.number().optional(),
+  timeRangeMax: z.number().optional(),
+  // Goals
+  healthGoal: z.string().optional().nullable(),
+  targetWeightKg: z.number().optional().nullable(),
+  targetCalories: z.number().optional().nullable(),
+  targetProteinG: z.number().optional().nullable(),
+  targetCarbsG: z.number().optional().nullable(),
+  targetFatG: z.number().optional().nullable(),
+  targetFiberG: z.number().optional().nullable(),
+  targetSodiumMg: z.number().optional().nullable(),
+  targetSugarG: z.number().optional().nullable(),
+  // Recommend
+  exploration: z.number().optional(),
+  diversityWeight: z.number().optional(),
+  healthWeight: z.number().optional(),
+  timeWeight: z.number().optional(),
+  popularityWeight: z.number().optional(),
+  personalWeight: z.number().optional(),
+  defaultSort: z.string().optional(),
+  showScoreBadge: z.boolean().optional(),
+  // Alerts
+  enableReminders: z.boolean().optional(),
+  // Advanced filters
+  filterCaloriesMin: z.number().optional(),
+  filterCaloriesMax: z.number().optional(),
+  filterProteinMin: z.number().optional(),
+  filterCarbsMin: z.number().optional(),
+  filterFatMin: z.number().optional(),
+  filterFiberMin: z.number().optional(),
+  filterSugarMax: z.number().optional(),
+  filterSodiumMax: z.number().optional(),
+  filterMaxTime: z.number().optional(),
+});
+
+router.get("/settings", authMiddleware, rateLimitMiddleware, async (req, res, next) => {
+  try {
+    const id = b2cCustomerId(req);
+
+    // Fetch app settings
+    const settingsRows = await db
+      .select()
+      .from(b2cCustomerSettings)
+      .where(eq(b2cCustomerSettings.b2cCustomerId, id))
+      .limit(1);
+
+    // Fetch health profile for goals tab fields
+    const healthRows = await db
+      .select()
+      .from(b2cCustomerHealthProfiles)
+      .where(eq(b2cCustomerHealthProfiles.b2cCustomerId, id))
+      .limit(1);
+
+    // Fetch preferred cuisines from junction table
+    const cuisineRows = await executeRaw(
+      `SELECT c.name FROM gold.b2c_customer_cuisine_preferences cp
+       JOIN gold.cuisines c ON c.id = cp.cuisine_id
+       WHERE cp.b2c_customer_id = $1`,
+      [id]
+    );
+    const preferredCuisines = cuisineRows.map((r: any) => r.name);
+
+    const s = settingsRows[0] as any;
+    const h = healthRows[0] as any;
+
+    res.json({
+      // General
+      units: s?.units ?? "US",
+      preferredCuisines,
+      dislikedIngredients: h?.disliked_ingredients ?? h?.dislikedIngredients ?? [],
+      timeRangeMin: s?.time_range_min ?? s?.timeRangeMin ?? 0,
+      timeRangeMax: s?.time_range_max ?? s?.timeRangeMax ?? 120,
+      // Goals (from health profile)
+      healthGoal: h?.health_goal ?? h?.healthGoal ?? null,
+      targetWeightKg: h?.target_weight_kg ?? h?.targetWeightKg ?? null,
+      targetCalories: h?.target_calories ?? h?.targetCalories ?? null,
+      targetProteinG: h?.target_protein_g ?? h?.targetProteinG ?? null,
+      targetCarbsG: h?.target_carbs_g ?? h?.targetCarbsG ?? null,
+      targetFatG: h?.target_fat_g ?? h?.targetFatG ?? null,
+      targetFiberG: h?.target_fiber_g ?? h?.targetFiberG ?? null,
+      targetSodiumMg: h?.target_sodium_mg ?? h?.targetSodiumMg ?? null,
+      targetSugarG: h?.target_sugar_g ?? h?.targetSugarG ?? null,
+      // Recommend
+      exploration: parseFloat(s?.exploration) || 0.15,
+      diversityWeight: parseFloat(s?.diversity_weight ?? s?.diversityWeight) || 0.1,
+      healthWeight: parseFloat(s?.health_weight ?? s?.healthWeight) || 0.35,
+      timeWeight: parseFloat(s?.time_weight ?? s?.timeWeight) || 0.15,
+      popularityWeight: parseFloat(s?.popularity_weight ?? s?.popularityWeight) || 0.15,
+      personalWeight: parseFloat(s?.personal_weight ?? s?.personalWeight) || 0.25,
+      defaultSort: s?.default_sort ?? s?.defaultSort ?? "time",
+      showScoreBadge: s?.show_score_badge ?? s?.showScoreBadge ?? true,
+      // Alerts
+      enableReminders: s?.enable_reminders ?? s?.enableReminders ?? false,
+      // Advanced filters
+      filterCaloriesMin: s?.filter_calories_min ?? s?.filterCaloriesMin ?? 0,
+      filterCaloriesMax: s?.filter_calories_max ?? s?.filterCaloriesMax ?? 1000,
+      filterProteinMin: parseFloat(s?.filter_protein_min ?? s?.filterProteinMin) || 0,
+      filterCarbsMin: parseFloat(s?.filter_carbs_min ?? s?.filterCarbsMin) || 0,
+      filterFatMin: parseFloat(s?.filter_fat_min ?? s?.filterFatMin) || 0,
+      filterFiberMin: parseFloat(s?.filter_fiber_min ?? s?.filterFiberMin) || 0,
+      filterSugarMax: parseFloat(s?.filter_sugar_max ?? s?.filterSugarMax) || 60,
+      filterSodiumMax: s?.filter_sodium_max ?? s?.filterSodiumMax ?? 2300,
+      filterMaxTime: s?.filter_max_time ?? s?.filterMaxTime ?? 120,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.patch("/settings", authMiddleware, rateLimitMiddleware, async (req, res, next) => {
+  try {
+    const id = b2cCustomerId(req);
+    const body = settingsSchema.parse(req.body ?? {});
+
+    // ── App preferences → b2c_customer_settings (upsert) ──
+    const appPayload: Record<string, any> = {
+      b2cCustomerId: id,
+      updatedAt: new Date(),
+    };
+    if (body.units !== undefined) appPayload.units = body.units;
+    // Cuisines handled via junction table below
+    if (body.timeRangeMin !== undefined) appPayload.timeRangeMin = body.timeRangeMin;
+    if (body.timeRangeMax !== undefined) appPayload.timeRangeMax = body.timeRangeMax;
+    if (body.exploration !== undefined) appPayload.exploration = String(body.exploration);
+    if (body.diversityWeight !== undefined) appPayload.diversityWeight = String(body.diversityWeight);
+    if (body.healthWeight !== undefined) appPayload.healthWeight = String(body.healthWeight);
+    if (body.timeWeight !== undefined) appPayload.timeWeight = String(body.timeWeight);
+    if (body.popularityWeight !== undefined) appPayload.popularityWeight = String(body.popularityWeight);
+    if (body.personalWeight !== undefined) appPayload.personalWeight = String(body.personalWeight);
+    if (body.defaultSort !== undefined) appPayload.defaultSort = body.defaultSort;
+    if (body.showScoreBadge !== undefined) appPayload.showScoreBadge = body.showScoreBadge;
+    if (body.enableReminders !== undefined) appPayload.enableReminders = body.enableReminders;
+    if (body.filterCaloriesMin !== undefined) appPayload.filterCaloriesMin = body.filterCaloriesMin;
+    if (body.filterCaloriesMax !== undefined) appPayload.filterCaloriesMax = body.filterCaloriesMax;
+    if (body.filterProteinMin !== undefined) appPayload.filterProteinMin = String(body.filterProteinMin);
+    if (body.filterCarbsMin !== undefined) appPayload.filterCarbsMin = String(body.filterCarbsMin);
+    if (body.filterFatMin !== undefined) appPayload.filterFatMin = String(body.filterFatMin);
+    if (body.filterFiberMin !== undefined) appPayload.filterFiberMin = String(body.filterFiberMin);
+    if (body.filterSugarMax !== undefined) appPayload.filterSugarMax = String(body.filterSugarMax);
+    if (body.filterSodiumMax !== undefined) appPayload.filterSodiumMax = body.filterSodiumMax;
+    if (body.filterMaxTime !== undefined) appPayload.filterMaxTime = body.filterMaxTime;
+
+    const existingSettings = await db
+      .select()
+      .from(b2cCustomerSettings)
+      .where(eq(b2cCustomerSettings.b2cCustomerId, id))
+      .limit(1);
+
+    if (existingSettings.length) {
+      await db
+        .update(b2cCustomerSettings)
+        .set(appPayload)
+        .where(eq(b2cCustomerSettings.b2cCustomerId, id));
+    } else {
+      await db.insert(b2cCustomerSettings).values(appPayload as any);
+    }
+
+    // ── Cuisines → junction table ──
+    if (body.preferredCuisines !== undefined) {
+      const cuisineIds = await resolveCuisineIds(body.preferredCuisines);
+      await replaceCustomerCuisines(id, cuisineIds);
+    }
+
+    // ── Health targets → b2c_customer_health_profiles ──
+    const healthFields = [
+      "healthGoal", "targetWeightKg", "targetCalories",
+      "targetProteinG", "targetCarbsG", "targetFatG",
+      "targetFiberG", "targetSodiumMg", "targetSugarG",
+      "dislikedIngredients",
+    ] as const;
+    const hasHealthUpdate = healthFields.some(f => (body as any)[f] !== undefined);
+
+    if (hasHealthUpdate) {
+      const healthPayload: Record<string, any> = {
+        b2cCustomerId: id,
+        updatedAt: new Date(),
+      };
+      if (body.healthGoal !== undefined) healthPayload.healthGoal = body.healthGoal;
+      if (body.targetWeightKg !== undefined) healthPayload.targetWeightKg = toNullableNumericString(body.targetWeightKg);
+      if (body.targetCalories !== undefined) healthPayload.targetCalories = body.targetCalories;
+      if (body.targetProteinG !== undefined) healthPayload.targetProteinG = toNullableNumericString(body.targetProteinG);
+      if (body.targetCarbsG !== undefined) healthPayload.targetCarbsG = toNullableNumericString(body.targetCarbsG);
+      if (body.targetFatG !== undefined) healthPayload.targetFatG = toNullableNumericString(body.targetFatG);
+      if (body.targetFiberG !== undefined) healthPayload.targetFiberG = toNullableNumericString(body.targetFiberG);
+      if (body.targetSodiumMg !== undefined) healthPayload.targetSodiumMg = body.targetSodiumMg;
+      if (body.targetSugarG !== undefined) healthPayload.targetSugarG = toNullableNumericString(body.targetSugarG);
+      if (body.dislikedIngredients !== undefined) healthPayload.dislikedIngredients = body.dislikedIngredients;
+
+      const existingHealth = await db
+        .select()
+        .from(b2cCustomerHealthProfiles)
+        .where(eq(b2cCustomerHealthProfiles.b2cCustomerId, id))
+        .limit(1);
+
+      if (existingHealth.length) {
+        await db
+          .update(b2cCustomerHealthProfiles)
+          .set(healthPayload)
+          .where(eq(b2cCustomerHealthProfiles.b2cCustomerId, id));
+      } else {
+        await db.insert(b2cCustomerHealthProfiles).values(healthPayload as any);
+      }
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
     next(err);
   }
 });
