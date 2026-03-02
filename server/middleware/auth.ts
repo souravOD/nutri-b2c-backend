@@ -7,6 +7,7 @@ import { handleAdminImpersonation } from "../auth/admin.js";
 import { setCurrentUser } from "../config/database.js";
 import { getB2cCustomerByAppwriteId } from "../services/b2cIdentity.js";
 import { AppError } from "./errorHandler.js";
+import { upsertProfileFromAppwrite } from "../services/supabaseSync.js";
 
 /**
  * Optionally export a light type others can use.
@@ -63,7 +64,24 @@ export async function authMiddleware(
 
     // Resolve Gold b2c_customers.id once (uses unique index — fast)
     const effectiveId = ctx.effectiveUserId ?? ctx.userId;
-    const customer = await getB2cCustomerByAppwriteId(effectiveId);
+    let customer = await getB2cCustomerByAppwriteId(effectiveId);
+
+    // Auto-provision: valid Appwrite user but no Supabase row → create one
+    if (!customer) {
+      try {
+        await upsertProfileFromAppwrite({
+          appwriteId: effectiveId,
+          profile: {
+            displayName: ctx.name ?? null,
+            email: ctx.email ?? null,
+          },
+          account: { email: ctx.email ?? null, name: ctx.name ?? null },
+        });
+        customer = await getB2cCustomerByAppwriteId(effectiveId);
+      } catch (e) {
+        console.error("[AUTH] Auto-provision b2c_customers failed:", e);
+      }
+    }
 
     // Expose to downstream handlers (keep it flexible type-wise)
     (req as any).user = {
