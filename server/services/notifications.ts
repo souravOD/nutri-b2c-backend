@@ -29,23 +29,33 @@ export async function getNotifications(
 ): Promise<{ notifications: Notification[]; total: number }> {
     const { customerId, type, limit = 20, offset = 0 } = params;
 
-    const typeFilter = type ? `AND type = '${type}'` : "";
+    // Build parameterized type filter (defense-in-depth against SQL injection)
+    const baseParams: (string | number)[] = [customerId];
+    let typeClause = "";
+    if (type) {
+        baseParams.push(type);
+        typeClause = `AND type = $${baseParams.length}`;
+    }
 
     const countRows = await executeRaw(
         `SELECT count(*)::int AS total
      FROM gold.b2c_notifications
-     WHERE customer_id = $1 ${typeFilter}`,
-        [customerId]
+     WHERE customer_id = $1 ${typeClause}`,
+        baseParams
     );
+
+    const dataParams: (string | number)[] = [...baseParams, limit, offset];
+    const limitIdx = dataParams.length - 1;
+    const offsetIdx = dataParams.length;
 
     const rows = await executeRaw(
         `SELECT id, customer_id, type, title, body, icon, action_url,
             is_read, created_at, read_at
      FROM gold.b2c_notifications
-     WHERE customer_id = $1 ${typeFilter}
+     WHERE customer_id = $1 ${typeClause}
      ORDER BY created_at DESC
-     LIMIT $2 OFFSET $3`,
-        [customerId, limit, offset]
+     LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+        dataParams
     );
 
     return {

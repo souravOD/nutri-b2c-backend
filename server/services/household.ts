@@ -397,11 +397,11 @@ export async function deleteFamilyMember(
   memberId: string,
   householdId: string
 ): Promise<void> {
-  // 1. Verify member exists and is NOT the profile owner
+  // 1. Verify member exists, belongs to this household, and is NOT the profile owner
   const member = await db
     .select()
     .from(b2cCustomers)
-    .where(eq(b2cCustomers.id, memberId))
+    .where(and(eq(b2cCustomers.id, memberId), eq(b2cCustomers.householdId, householdId)))
     .limit(1);
 
   if (!member[0]) {

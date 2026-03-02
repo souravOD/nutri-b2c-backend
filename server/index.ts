@@ -62,12 +62,15 @@ async function gracefulShutdown(signal: string) {
   isShuttingDown = true;
   console.log(`[shutdown] Received ${signal}. Closing server gracefully...`);
 
-  // Stop accepting new connections
-  server.close(() => {
-    console.log("[shutdown] HTTP server closed.");
+  // Stop accepting new connections and wait for in-flight requests to finish
+  await new Promise<void>((resolve) => {
+    server.close(() => {
+      console.log("[shutdown] HTTP server closed.");
+      resolve();
+    });
   });
 
-  // Drain DB connections
+  // Drain DB connections after HTTP server is fully closed
   try {
     await queryClient.end({ timeout: 10 });
     console.log("[shutdown] DB connections drained.");
