@@ -42,6 +42,36 @@ export async function toggleSaveRecipe(b2cCustomerId: string, recipeId: string):
   return { saved: true };
 }
 
+// PRD-23: "Not for me" — mark recipe as rejected
+export async function rejectRecipe(b2cCustomerId: string, recipeId: string): Promise<{ rejected: boolean }> {
+  const existing = await db
+    .select()
+    .from(customerProductInteractions)
+    .where(
+      and(
+        eq(customerProductInteractions.b2cCustomerId, b2cCustomerId),
+        eq(customerProductInteractions.recipeId, recipeId),
+        eq(customerProductInteractions.entityType, "recipe"),
+        eq(customerProductInteractions.interactionType, "rejected")
+      )
+    )
+    .limit(1);
+
+  if (existing.length > 0) {
+    return { rejected: true }; // already rejected, idempotent
+  }
+
+  await db.insert(customerProductInteractions).values({
+    b2cCustomerId,
+    recipeId,
+    entityType: "recipe",
+    interactionType: "rejected",
+    interactionTimestamp: new Date(),
+    createdAt: new Date(),
+  });
+  return { rejected: true };
+}
+
 export async function getSavedRecipes(b2cCustomerId: string, limit: number = 50, offset: number = 0) {
   const rows = await executeRaw(
     `

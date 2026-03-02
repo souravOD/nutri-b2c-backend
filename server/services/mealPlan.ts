@@ -39,6 +39,7 @@ export interface GeneratePlanInput {
     maxCookTime?: number;
     cuisines?: string[];
     excludeRecipeIds?: string[];
+    prompt?: string;
   };
 }
 
@@ -412,6 +413,7 @@ export async function generateMealPlan(
     .insert(mealPlans)
     .values({
       householdId: household.id,
+      b2cCustomerId,
       planName: `Meal Plan ${input.startDate} to ${input.endDate}`,
       startDate: input.startDate,
       endDate: input.endDate,

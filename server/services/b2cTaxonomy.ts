@@ -3,6 +3,7 @@ import {
   b2cCustomerDietaryPreferences,
   b2cCustomerAllergens,
   b2cCustomerHealthConditions,
+  b2cCustomerCuisinePreferences,
 } from "../../shared/goldSchema.js";
 import { eq } from "drizzle-orm";
 
@@ -123,6 +124,19 @@ export async function replaceCustomerConditions(customerId: string, conditionIds
       conditionId,
       isActive: true,
       createdAt: new Date(),
+    }))
+  );
+}
+
+export async function replaceCustomerCuisines(customerId: string, cuisineIds: string[]) {
+  await db
+    .delete(b2cCustomerCuisinePreferences)
+    .where(eq(b2cCustomerCuisinePreferences.b2cCustomerId, customerId));
+  if (!cuisineIds.length) return;
+  await db.insert(b2cCustomerCuisinePreferences).values(
+    cuisineIds.map((cuisineId) => ({
+      b2cCustomerId: customerId,
+      cuisineId,
     }))
   );
 }

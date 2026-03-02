@@ -12,6 +12,7 @@ import {
   getMemberDetail,
   updateMemberBasicInfo,
   updateMemberHealthProfile,
+  deleteFamilyMember,
 } from "../services/household.js";
 
 const router = Router();
@@ -131,6 +132,22 @@ router.patch(
       const parsed = updateHealthSchema.parse(req.body);
       const member = await updateMemberHealthProfile(req.params.id, parsed);
       res.json({ member });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// DELETE /api/v1/households/members/:id
+router.delete(
+  "/members/:id",
+  rateLimitMiddleware,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const customerId = b2cId(req);
+      const household = await getOrCreateHousehold(customerId);
+      await deleteFamilyMember(req.params.id, household.id);
+      res.status(204).end();
     } catch (err) {
       next(err);
     }

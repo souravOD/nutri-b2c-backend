@@ -20,6 +20,7 @@ import { idempotencyMiddleware, storeIdempotentResponse } from "./middleware/ide
 import userRecipesRouter from "./routes/userRecipes.js";
 import chatRouter from "./routes/chat.js";
 import substitutionRouter from "./routes/substitutions.js";
+import notificationRouter from "./routes/notifications.js";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Global middleware
@@ -44,10 +45,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.use("/api/v1/nutrition-dashboard", nutritionDashboardRouter);
   app.use("/api/v1/chat", chatRouter);
   app.use("/api/v1/substitutions", substitutionRouter);
+  app.use("/api/v1/notifications", notificationRouter);
   // Health checks (no /api prefix)
   app.use("/", healthRouter);
 
-  // Error handling - Note: notFoundHandler will be added after Vite middleware in index.ts
+  // Error handling
+  // notFoundHandler catches any unmatched routes BEFORE the generic error handler
+  app.use(notFoundHandler);
   app.use(errorHandler);
 
   const httpServer = createServer(app);

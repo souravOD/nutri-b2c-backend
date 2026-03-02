@@ -45,12 +45,14 @@ const isOriginAllowed = (origin: string) => {
 // IMPORTANT: keep header names lowercase
 const corsOptions: cors.CorsOptions = {
   origin(origin, cb) {
-    if (!origin) return cb(null, true);                 // allow server-to-server / curl
+    // No origin = server-to-server call (curl, loadbalancer healthcheck, etc.)
+    // Allow these; browsers always send Origin.
+    if (!origin) return cb(null, true);
     if (CORS_ALLOW_ALL) return cb(null, true);
     if (isOriginAllowed(origin)) return cb(null, true);
     return cb(new Error(`Origin ${origin} not allowed by CORS`));
   },
-  methods: ["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: [
     "content-type",
     "accept",

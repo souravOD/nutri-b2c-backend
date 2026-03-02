@@ -118,6 +118,13 @@ export const b2cCustomerHealthConditions = gold.table("b2c_customer_health_condi
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+export const b2cCustomerCuisinePreferences = gold.table("b2c_customer_cuisine_preferences", {
+  b2cCustomerId: uuid("b2c_customer_id").notNull(),
+  cuisineId: uuid("cuisine_id").notNull(),
+}, (table) => ({
+  pk: { columns: [table.b2cCustomerId, table.cuisineId] },
+}));
+
 export const allergens = gold.table("allergens", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
   code: varchar("code", { length: 50 }).notNull(),
@@ -685,6 +692,45 @@ export const chatSessions = gold.table("chat_sessions", {
   expiresAt: timestamp("expires_at"),
 });
 
+// ── Customer Settings (App Preferences) ─────────────────────────────────────
+
+export const b2cCustomerSettings = gold.table("b2c_customer_settings", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  b2cCustomerId: uuid("b2c_customer_id").notNull().unique(),
+
+  // General (cuisines moved to junction table)
+  units: varchar("units", { length: 10 }).default("US"),
+  timeRangeMin: integer("time_range_min").default(0),
+  timeRangeMax: integer("time_range_max").default(120),
+
+  // Recommend
+  exploration: numeric("exploration", { precision: 4, scale: 3 }).default("0.150"),
+  diversityWeight: numeric("diversity_weight", { precision: 4, scale: 3 }).default("0.100"),
+  healthWeight: numeric("health_weight", { precision: 4, scale: 3 }).default("0.350"),
+  timeWeight: numeric("time_weight", { precision: 4, scale: 3 }).default("0.150"),
+  popularityWeight: numeric("popularity_weight", { precision: 4, scale: 3 }).default("0.150"),
+  personalWeight: numeric("personal_weight", { precision: 4, scale: 3 }).default("0.250"),
+  defaultSort: varchar("default_sort", { length: 20 }).default("time"),
+  showScoreBadge: boolean("show_score_badge").default(true),
+
+  // Alerts
+  enableReminders: boolean("enable_reminders").default(false),
+
+  // Advanced filters
+  filterCaloriesMin: integer("filter_calories_min").default(0),
+  filterCaloriesMax: integer("filter_calories_max").default(1000),
+  filterProteinMin: numeric("filter_protein_min", { precision: 6, scale: 2 }).default("0"),
+  filterCarbsMin: numeric("filter_carbs_min", { precision: 6, scale: 2 }).default("0"),
+  filterFatMin: numeric("filter_fat_min", { precision: 6, scale: 2 }).default("0"),
+  filterFiberMin: numeric("filter_fiber_min", { precision: 6, scale: 2 }).default("0"),
+  filterSugarMax: numeric("filter_sugar_max", { precision: 6, scale: 2 }).default("60"),
+  filterSodiumMax: integer("filter_sodium_max").default(2300),
+  filterMaxTime: integer("filter_max_time").default(120),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
 // ── Zod Schemas ─────────────────────────────────────────────────────────────
 
 export const insertRecipeSchema = createInsertSchema(recipes).omit({
@@ -725,4 +771,4 @@ export type ShoppingList = typeof shoppingLists.$inferSelect;
 export type ShoppingListItem = typeof shoppingListItems.$inferSelect;
 export type HouseholdBudget = typeof householdBudgets.$inferSelect;
 export type ChatSession = typeof chatSessions.$inferSelect;
-
+export type B2cCustomerSettings = typeof b2cCustomerSettings.$inferSelect;

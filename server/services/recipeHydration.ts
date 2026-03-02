@@ -81,6 +81,42 @@ export async function getRecipeNutritionMap(recipeIds: string[]) {
       saturated_fat_g: row.saturated_fat_g ?? null,
     });
   }
+
+  // Fallback: for any recipes not found in nutrition_facts,
+  // try recipe_nutrition_profiles table
+  const missingIds = recipeIds.filter((id) => !map.has(id));
+  if (missingIds.length > 0) {
+    const fallbackRows = await executeRaw(
+      `
+      SELECT
+        recipe_id,
+        calories,
+        protein_g,
+        total_carbs_g  AS carbs_g,
+        total_fat_g    AS fat_g,
+        dietary_fiber_g AS fiber_g,
+        total_sugars_g AS sugar_g,
+        sodium_mg,
+        saturated_fat_g
+      FROM gold.recipe_nutrition_profiles
+      WHERE recipe_id = ANY($1::uuid[])
+      `,
+      [missingIds]
+    );
+    for (const row of fallbackRows as any[]) {
+      map.set(row.recipe_id, {
+        calories: row.calories ?? null,
+        protein_g: row.protein_g ?? null,
+        carbs_g: row.carbs_g ?? null,
+        fat_g: row.fat_g ?? null,
+        fiber_g: row.fiber_g ?? null,
+        sugar_g: row.sugar_g ?? null,
+        sodium_mg: row.sodium_mg ?? null,
+        saturated_fat_g: row.saturated_fat_g ?? null,
+      });
+    }
+  }
+
   return map;
 }
 
