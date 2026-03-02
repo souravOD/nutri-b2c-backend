@@ -390,3 +390,60 @@ export async function updateMemberHealthProfile(
 
   return getMemberDetail(memberId);
 }
+
+// ── Delete Family Member ────────────────────────────────────────────────────
+
+export async function deleteFamilyMember(
+  memberId: string,
+  householdId: string
+): Promise<void> {
+  // 1. Verify member exists and is NOT the profile owner
+  const member = await db
+    .select()
+    .from(b2cCustomers)
+    .where(eq(b2cCustomers.id, memberId))
+    .limit(1);
+
+  if (!member[0]) {
+    const err = new Error("Household member not found");
+    (err as any).status = 404;
+    throw err;
+  }
+
+  if (member[0].isProfileOwner) {
+    const err = new Error("Cannot delete the primary profile owner");
+    (err as any).status = 403;
+    throw err;
+  }
+
+  // 2. Cascade delete from child tables
+  await db
+    .delete(b2cCustomerHealthConditions)
+    .where(eq(b2cCustomerHealthConditions.b2cCustomerId, memberId));
+
+  await db
+    .delete(b2cCustomerDietaryPreferences)
+    .where(eq(b2cCustomerDietaryPreferences.b2cCustomerId, memberId));
+
+  await db
+    .delete(b2cCustomerAllergens)
+    .where(eq(b2cCustomerAllergens.b2cCustomerId, memberId));
+
+  await db
+    .delete(b2cCustomerHealthProfiles)
+    .where(eq(b2cCustomerHealthProfiles.b2cCustomerId, memberId));
+
+  // 3. Delete the member record
+  await db.delete(b2cCustomers).where(eq(b2cCustomers.id, memberId));
+
+  // 4. Update household total_members count
+  const remainingMembers = await db
+    .select()
+    .from(b2cCustomers)
+    .where(eq(b2cCustomers.householdId, householdId));
+
+  await db
+    .update(households)
+    .set({ totalMembers: remainingMembers.length })
+    .where(eq(households.id, householdId));
+}

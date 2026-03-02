@@ -92,6 +92,18 @@ router.post("/:id/report", authMiddleware, rateLimitMiddleware, async (req, res,
   }
 });
 
+// PRD-23: Mark recipe as "Not for me"
+router.post("/:id/reject", authMiddleware, rateLimitMiddleware, async (req, res, next) => {
+  try {
+    const b2cCustomerId = requireB2cCustomerIdFromReq(req);
+    const { rejectRecipe } = await import("../services/recipes.js");
+    const result = await rejectRecipe(b2cCustomerId, req.params.id);
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
 // ── Recipe Ratings ──────────────────────────────────────────────────────────
 
 const rateSchema = z.object({

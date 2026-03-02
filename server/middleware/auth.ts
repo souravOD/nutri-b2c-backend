@@ -34,12 +34,14 @@ export async function authMiddleware(
   next: NextFunction
 ) {
   try {
-    // Diagnostics (fixes the old "....env.NODE_ENV" bug)
-    console.log(
-      `[AUTH] ${req.method} ${req.url} (env=${process.env.NODE_ENV}) isAdminRoute=${req.url.includes(
-        "/admin"
-      )}`
-    );
+    // Diagnostics — only log in development to avoid info leak in production
+    if (process.env.NODE_ENV !== "production") {
+      console.log(
+        `[AUTH] ${req.method} ${req.url} (env=${process.env.NODE_ENV}) isAdminRoute=${req.url.includes(
+          "/admin"
+        )}`
+      );
+    }
 
     const jwt = extractJWTFromHeaders(req.headers);
     if (!jwt) {
