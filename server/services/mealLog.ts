@@ -676,7 +676,7 @@ export async function getStreak(
        WHERE ml.b2c_customer_id = $1
          AND ml.log_date <= $2
        ORDER BY ml.log_date DESC
-       LIMIT 60
+       LIMIT 400
      )
      SELECT log_date FROM dated_logs ORDER BY log_date DESC`,
     [scope.targetMemberId, todayStr]

@@ -2,7 +2,6 @@
   "version": 2,
   "functions": {
     "server/index.ts": {
-      "runtime": "@vercel/node@3.x",
       "maxDuration": 10
     }
   },

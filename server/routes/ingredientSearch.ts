@@ -11,7 +11,8 @@ const router = Router();
 router.get("/search", authMiddleware, async (req, res, next) => {
     try {
         const q = String(req.query.q ?? "");
-        const limit = Math.min(20, Math.max(1, Number(req.query.limit ?? 10)));
+        const rawLimit = Number(req.query.limit ?? 10);
+        const limit = Math.min(20, Math.max(1, Number.isFinite(rawLimit) ? rawLimit : 10));
 
         if (q.trim().length < 2) {
             return res.json({ items: [] });

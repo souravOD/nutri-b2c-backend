@@ -72,8 +72,10 @@ router.post("/detect-allergens", authMiddleware, async (req, res, next) => {
     try {
         requireB2cCustomerIdFromReq(req); // ensure authenticated
 
-        const names: string[] = req.body?.ingredient_names ?? [];
-        if (!Array.isArray(names) || names.length === 0) {
+        const rawNames: string[] = req.body?.ingredient_names ?? [];
+        // Filter out empty/whitespace-only names to avoid ILIKE '%%' matching everything
+        const names = rawNames.map((n) => (typeof n === "string" ? n.trim() : "")).filter((n) => n.length > 0);
+        if (!Array.isArray(rawNames) || names.length === 0) {
             return res.json({ detected_allergens: [] });
         }
 
