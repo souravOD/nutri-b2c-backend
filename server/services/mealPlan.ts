@@ -318,7 +318,7 @@ export async function generateMealPlan(
     ...(input.preferences?.excludeRecipeIds ?? []),
   ];
 
-  const maxRecipes = parseInt(process.env.MEAL_PLAN_MAX_RECIPES || "150", 10);
+  const maxRecipes = parseInt(process.env.MEAL_PLAN_MAX_RECIPES || "50", 10);
   const preferredCuisines = input.preferences?.cuisines ?? [];
   const cuisineIds = preferredCuisines.length > 0
     ? await resolveCuisineIds(preferredCuisines)

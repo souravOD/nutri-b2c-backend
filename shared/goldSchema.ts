@@ -731,6 +731,23 @@ export const b2cCustomerSettings = gold.table("b2c_customer_settings", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
+// ── Unit Conversions ────────────────────────────────────────────────────────
+
+export const unitConversions = gold.table("unit_conversions", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  fromUnit: varchar("from_unit", { length: 50 }).notNull(),
+  toUnit: varchar("to_unit", { length: 50 }).default("g").notNull(),
+  factor: numeric("factor", { precision: 12, scale: 4 }).notNull(),
+  ingredientId: uuid("ingredient_id"),
+  unitCategory: varchar("unit_category", { length: 30 }).notNull(),
+  aliases: text("aliases").array().default(sql`'{}'`),
+  system: varchar("system", { length: 10 }).default("us"),
+  isApproximate: boolean("is_approximate").default(false),
+  source: varchar("source", { length: 100 }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
 // ── Zod Schemas ─────────────────────────────────────────────────────────────
 
 export const insertRecipeSchema = createInsertSchema(recipes).omit({

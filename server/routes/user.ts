@@ -454,9 +454,15 @@ router.post("/my-recipes/:id/submit", authMiddleware, rateLimitMiddleware, async
 router.delete("/account", authMiddleware, rateLimitMiddleware, async (req, res, next) => {
   try {
     const id = b2cCustomerId(req);
+    const awUserId = appwriteUserId(req);
 
     await executeRaw("BEGIN");
-    await executeRaw("DELETE FROM gold.customer_product_interactions WHERE b2c_customer_id = $1", [id]);
+
+    // ── Recipe-related (children first) ──
+    await executeRaw(
+      "DELETE FROM gold.recipe_nutrition_profiles WHERE recipe_id IN (SELECT id FROM gold.recipes WHERE created_by_user_id = $1)",
+      [id]
+    );
     await executeRaw(
       "DELETE FROM gold.recipe_ingredients WHERE recipe_id IN (SELECT id FROM gold.recipes WHERE created_by_user_id = $1)",
       [id]
@@ -466,15 +472,55 @@ router.delete("/account", authMiddleware, rateLimitMiddleware, async (req, res, 
       [id]
     );
     await executeRaw("DELETE FROM gold.recipes WHERE created_by_user_id = $1", [id]);
+
+    // ── Meal logs (children → parent) ──
+    await executeRaw(
+      "DELETE FROM gold.meal_log_item_nutrients WHERE meal_log_item_id IN (SELECT id FROM gold.meal_log_items WHERE meal_log_id IN (SELECT id FROM gold.meal_logs WHERE b2c_customer_id = $1))",
+      [id]
+    );
+    await executeRaw(
+      "DELETE FROM gold.meal_log_items WHERE meal_log_id IN (SELECT id FROM gold.meal_logs WHERE b2c_customer_id = $1)",
+      [id]
+    );
+    await executeRaw("DELETE FROM gold.meal_logs WHERE b2c_customer_id = $1", [id]);
+
+    // ── Meal plans (children → parent) ──
+    await executeRaw(
+      "DELETE FROM gold.meal_plan_items WHERE meal_plan_id IN (SELECT id FROM gold.meal_plans WHERE b2c_customer_id = $1)",
+      [id]
+    );
+    await executeRaw("DELETE FROM gold.meal_plans WHERE b2c_customer_id = $1", [id]);
+
+    // ── Shopping lists ──
+    await executeRaw(
+      "DELETE FROM gold.shopping_list_items WHERE shopping_list_id IN (SELECT id FROM gold.shopping_lists WHERE b2c_customer_id = $1)",
+      [id]
+    );
+    await executeRaw("DELETE FROM gold.shopping_lists WHERE b2c_customer_id = $1", [id]);
+
+    // ── Interactions & ratings ──
+    await executeRaw("DELETE FROM gold.customer_product_interactions WHERE b2c_customer_id = $1", [id]);
+    await executeRaw("DELETE FROM gold.recipe_ratings WHERE b2c_customer_id = $1", [id]);
+
+    // ── Health & preferences ──
+    await executeRaw("DELETE FROM gold.b2c_customer_weight_history WHERE b2c_customer_id = $1", [id]);
     await executeRaw("DELETE FROM gold.b2c_customer_health_profiles WHERE b2c_customer_id = $1", [id]);
     await executeRaw("DELETE FROM gold.b2c_customer_allergens WHERE b2c_customer_id = $1", [id]);
     await executeRaw("DELETE FROM gold.b2c_customer_dietary_preferences WHERE b2c_customer_id = $1", [id]);
     await executeRaw("DELETE FROM gold.b2c_customer_health_conditions WHERE b2c_customer_id = $1", [id]);
+    await executeRaw("DELETE FROM gold.b2c_customer_cuisine_preferences WHERE b2c_customer_id = $1", [id]);
+
+    // ── Settings ──
+    await executeRaw("DELETE FROM gold.b2c_customer_settings WHERE b2c_customer_id = $1", [id]);
+
+    // ── Customer record itself (last) ──
     await executeRaw("DELETE FROM gold.b2c_customers WHERE id = $1", [id]);
+
     await executeRaw("COMMIT");
 
-    await deleteAppwriteDocuments(appwriteUserId(req));
-    await deleteAppwriteUser(appwriteUserId(req));
+    // ── Appwrite cleanup (after Supabase commit succeeds) ──
+    await deleteAppwriteDocuments(awUserId);
+    await deleteAppwriteUser(awUserId);
 
     res.status(204).end();
   } catch (err) {

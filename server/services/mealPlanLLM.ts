@@ -6,8 +6,8 @@ import { createHash } from "node:crypto";
 const LITELLM_BASE_URL = process.env.LITELLM_BASE_URL || "https://litellm.confer.today/v1";
 const LITELLM_API_KEY = process.env.LITELLM_API_KEY || process.env.LITELLM_API_KEY_MINI || "";
 const MEAL_PLAN_MODEL = process.env.MEAL_PLAN_LLM_MODEL || process.env.LLM_MODEL || "gpt-5-nano";
-const MEAL_PLAN_TIMEOUT = parseInt(process.env.MEAL_PLAN_TIMEOUT_MS || "30000", 10);
-const MEAL_SWAP_TIMEOUT = parseInt(process.env.MEAL_PLAN_SWAP_TIMEOUT_MS || "15000", 10);
+const MEAL_PLAN_TIMEOUT = parseInt(process.env.MEAL_PLAN_TIMEOUT_MS || "60000", 10);
+const MEAL_SWAP_TIMEOUT = parseInt(process.env.MEAL_PLAN_SWAP_TIMEOUT_MS || "30000", 10);
 const LLM_COOLDOWN_MS = parseInt(process.env.MEAL_PLAN_LLM_COOLDOWN_MS || "120000", 10);
 
 let llmBlockedUntil = 0;
@@ -256,7 +256,7 @@ export async function generateMealPlanWithLLM(
     fatTargetG: m.fatTargetG,
   }));
 
-  const maxRecipes = parseInt(process.env.MEAL_PLAN_MAX_RECIPES || "150", 10);
+  const maxRecipes = parseInt(process.env.MEAL_PLAN_MAX_RECIPES || "50", 10);
   const hasGraphScores = context.recipes.some(r => r.graphScore != null);
   const recipeSummary = context.recipes.slice(0, maxRecipes).map((r) => ({
     id: r.id,

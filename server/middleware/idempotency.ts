@@ -26,16 +26,8 @@ function getRecord(key: string): IdempotencyRecord | undefined {
 export async function idempotencyMiddleware(req: Request, res: Response, next: NextFunction) {
   const idempotencyKey = req.headers["idempotency-key"] as string | undefined;
 
-  if (["POST", "PUT", "PATCH"].includes(req.method) && !idempotencyKey) {
-    return res.status(400).json({
-      type: "about:blank",
-      title: "Bad Request",
-      status: 400,
-      detail: "Idempotency-Key header required for state-changing operations",
-      instance: req.url,
-    });
-  }
-
+  // Idempotency is opt-in: if header is absent, skip dedup and proceed normally.
+  // The frontend's authFetch always sends the header for POST/PUT/PATCH.
   if (!idempotencyKey) {
     return next();
   }

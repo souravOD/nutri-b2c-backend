@@ -644,7 +644,86 @@ export async function getStreak(
     .where(eq(mealLogStreaks.b2cCustomerId, scope.targetMemberId))
     .limit(1);
 
-  return rows[0] ?? { currentStreak: 0, longestStreak: 0, totalDaysLogged: 0, lastLoggedDate: null };
+  const cached = rows[0];
+  if (!cached || !cached.lastLoggedDate) {
+    return { currentStreak: 0, longestStreak: 0, totalDaysLogged: 0, lastLoggedDate: null };
+  }
+
+  // Validate: if lastLoggedDate is not today or yesterday, the streak is broken
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const today = new Date(todayStr + "T00:00:00Z");
+  const lastLogged = new Date(cached.lastLoggedDate + "T00:00:00Z");
+  const diffMs = today.getTime() - lastLogged.getTime();
+  const diffDays = Math.round(diffMs / 86400000);
+
+  if (diffDays > 1) {
+    // Streak is broken — more than 1 day gap since last log
+    // Reset cached streak to 0 (lazy reset)
+    await db
+      .update(mealLogStreaks)
+      .set({ currentStreak: 0 })
+      .where(eq(mealLogStreaks.id, cached.id));
+    return { currentStreak: 0, longestStreak: cached.longestStreak ?? 0, totalDaysLogged: cached.totalDaysLogged ?? 0, lastLoggedDate: cached.lastLoggedDate };
+  }
+
+  // Streak is still valid — but verify by counting actual consecutive days with items
+  // Walk backwards from lastLoggedDate and count days that have at least 1 meal_log_item
+  const verifiedRows = (await executeRaw(
+    `WITH dated_logs AS (
+       SELECT DISTINCT ml.log_date
+       FROM gold.meal_logs ml
+       INNER JOIN gold.meal_log_items mli ON mli.meal_log_id = ml.id
+       WHERE ml.b2c_customer_id = $1
+         AND ml.log_date <= $2
+       ORDER BY ml.log_date DESC
+       LIMIT 60
+     )
+     SELECT log_date FROM dated_logs ORDER BY log_date DESC`,
+    [scope.targetMemberId, todayStr]
+  )) as any[];
+
+  // Count consecutive days backwards from the most recent logged date
+  let streak = 0;
+  if (verifiedRows.length > 0) {
+    let expectedDate = new Date(todayStr + "T00:00:00Z");
+    // If today has no items yet, start from yesterday
+    const latestLogDate = verifiedRows[0]?.log_date;
+    if (latestLogDate) {
+      const latestDate = new Date(latestLogDate + "T00:00:00Z");
+      const daysSinceLatest = Math.round((today.getTime() - latestDate.getTime()) / 86400000);
+      if (daysSinceLatest > 1) {
+        // More than 1 day gap — streak is 0
+        streak = 0;
+      } else {
+        expectedDate = latestDate;
+        for (const row of verifiedRows) {
+          const rowDate = new Date(row.log_date + "T00:00:00Z");
+          if (rowDate.getTime() === expectedDate.getTime()) {
+            streak++;
+            expectedDate = new Date(expectedDate);
+            expectedDate.setUTCDate(expectedDate.getUTCDate() - 1);
+          } else if (rowDate.getTime() < expectedDate.getTime()) {
+            break; // Gap found
+          }
+        }
+      }
+    }
+  }
+
+  // Update cached value if different
+  if (streak !== (cached.currentStreak ?? 0)) {
+    await db
+      .update(mealLogStreaks)
+      .set({ currentStreak: streak })
+      .where(eq(mealLogStreaks.id, cached.id));
+  }
+
+  return {
+    currentStreak: streak,
+    longestStreak: Math.max(cached.longestStreak ?? 0, streak),
+    totalDaysLogged: cached.totalDaysLogged ?? 0,
+    lastLoggedDate: cached.lastLoggedDate,
+  };
 }
 
 export async function updateStreak(b2cCustomerId: string, dateStr: string) {
