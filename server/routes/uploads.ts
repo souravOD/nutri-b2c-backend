@@ -2,6 +2,7 @@ import { Router } from "express";
 import { authMiddleware } from "../middleware/auth.js";
 import { requireB2cCustomerIdFromReq } from "../services/b2cIdentity.js";
 import { uploadRecipeImage, deleteRecipeImage } from "../services/imageUpload.js";
+import { randomUUID } from "node:crypto";
 import multer from "multer";
 
 const upload = multer({
@@ -38,7 +39,7 @@ router.post(
             }
 
             const b2cCustomerId = requireB2cCustomerIdFromReq(req);
-            const recipeId = req.body?.recipeId || crypto.randomUUID();
+            const recipeId = req.body?.recipeId || randomUUID();
 
             const url = await uploadRecipeImage(
                 req.file.buffer,

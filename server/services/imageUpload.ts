@@ -1,13 +1,20 @@
 import { createClient } from "@supabase/supabase-js";
 
-const SUPABASE_URL = process.env.SUPABASE_URL!;
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const BUCKET_NAME = "recipe-images";
+
+if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+    console.warn("Supabase Storage not configured: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for image uploads");
+}
 
 let _supabase: ReturnType<typeof createClient> | null = null;
 
 function getSupabase() {
     if (!_supabase) {
+        if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+            throw new Error("Supabase Storage not configured: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required");
+        }
         _supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
     }
     return _supabase;
