@@ -5,6 +5,7 @@ import {
   recipeIngredients,
   ingredients,
   nutritionFacts,
+  recipeNutritionProfiles,
 } from "../../shared/goldSchema.js";
 import { resolveCuisineIds } from "./b2cTaxonomy.js";
 import { getRecipeIngredients, getRecipeNutritionMap } from "./recipeHydration.js";
@@ -148,6 +149,48 @@ async function replaceRecipeNutrition(recipeId: string, nutrition: AnyObj) {
   }
 }
 
+/**
+ * Dual-write: also insert a flat summary row into gold.recipe_nutrition_profiles
+ * for direct access and consistency with curated recipes.
+ */
+async function replaceRecipeNutritionProfile(
+  recipeId: string,
+  nutrition: AnyObj,
+  servings?: number | null
+) {
+  // Delete existing profile for this recipe
+  await db
+    .delete(recipeNutritionProfiles)
+    .where(eq(recipeNutritionProfiles.recipeId, recipeId));
+
+  const toNum = (v: any): string | null => {
+    if (v === "" || v == null) return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? String(n) : null;
+  };
+
+  // Only insert if we have at least some nutrition data
+  const hasData = nutrition.calories || nutrition.protein_g || nutrition.fat_g || nutrition.carbs_g;
+  if (!hasData) return;
+
+  await db.insert(recipeNutritionProfiles).values({
+    recipeId,
+    perBasis: "per_serving",
+    servings: toNum(servings ?? 1),
+    calories: toNum(nutrition.calories),
+    totalFatG: toNum(nutrition.fat_g),
+    saturatedFatG: toNum(nutrition.saturated_fat_g),
+    sodiumMg: toNum(nutrition.sodium_mg),
+    totalCarbsG: toNum(nutrition.carbs_g),
+    dietaryFiberG: toNum(nutrition.fiber_g),
+    totalSugarsG: toNum(nutrition.sugar_g),
+    proteinG: toNum(nutrition.protein_g),
+    dataSource: "user_generated",
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  });
+}
+
 export async function createUserRecipe(b2cCustomerId: string, payload: AnyObj) {
   const input = normalizeRecipeInput(payload);
   if (!input.title || input.title.trim().length < 2) {
@@ -180,6 +223,7 @@ export async function createUserRecipe(b2cCustomerId: string, payload: AnyObj) {
 
   await replaceRecipeIngredients(row.id, input.ingredients);
   await replaceRecipeNutrition(row.id, input.nutrition);
+  await replaceRecipeNutritionProfile(row.id, input.nutrition, input.servings);
 
   return row;
 }
@@ -217,6 +261,7 @@ export async function updateUserRecipe(b2cCustomerId: string, recipeId: string, 
   }
   if (updates.calories !== undefined || updates.protein_g !== undefined) {
     await replaceRecipeNutrition(recipeId, input.nutrition);
+    await replaceRecipeNutritionProfile(recipeId, input.nutrition, input.servings);
   }
 
   return updated[0];

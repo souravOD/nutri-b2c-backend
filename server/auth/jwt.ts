@@ -7,6 +7,10 @@ export interface UserContext {
   profile?: any;
   email?: string | null;
   name?: string | null;
+  // Extended by auth middleware:
+  effectiveUserId?: string;
+  b2cCustomerId?: string;
+  isImpersonating?: boolean;
 }
 
 export async function verifyAppwriteJWT(jwt: string): Promise<UserContext> {

@@ -2,25 +2,15 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import type { Request, Response, NextFunction } from "express";
-import { verifyAppwriteJWT, extractJWTFromHeaders } from "../auth/jwt.js";
+import { verifyAppwriteJWT, extractJWTFromHeaders, type UserContext } from "../auth/jwt.js";
 import { handleAdminImpersonation } from "../auth/admin.js";
 import { setCurrentUser } from "../config/database.js";
 import { getB2cCustomerByAppwriteId } from "../services/b2cIdentity.js";
 import { AppError } from "./errorHandler.js";
 import { upsertProfileFromAppwrite } from "../services/supabaseSync.js";
 
-/**
- * Optionally export a light type others can use.
- * (Safe even if the rest of the codebase doesn't import it.)
- */
-export type UserContext = {
-  userId: string;
-  effectiveUserId?: string;
-  b2cCustomerId?: string;
-  isAdmin?: boolean;
-  isImpersonating?: boolean;
-  profile?: any;
-};
+// Re-export for consumers that import from auth.ts
+export type { UserContext };
 
 /**
  * Authentication middleware:
