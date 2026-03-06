@@ -25,16 +25,15 @@ interface FeatureConfig {
 // ── Per-Feature Configuration ────────────────────────────
 
 const FEATURE_CONFIG: Record<FeatureName, FeatureConfig> = {
-    search: { flag: "USE_GRAPH_SEARCH", endpoint: "/search/hybrid", timeout: 60_000 },
-    feed: { flag: "USE_GRAPH_FEED", endpoint: "/recommend/feed", timeout: 60_000 },
-    mealPlan: { flag: "USE_GRAPH_MEAL_PLAN", endpoint: "/recommend/meal-candidates", timeout: 60_000 },
-    grocery: { flag: "USE_GRAPH_GROCERY", endpoint: "/recommend/products", timeout: 60_000 },
-    scanner: { flag: "USE_GRAPH_SCANNER", endpoint: "/recommend/alternatives", timeout: 60_000 },
-    mealLog: { flag: "USE_GRAPH_MEAL_LOG", endpoint: "/analytics/meal-patterns", timeout: 60_000 },
-    chatbot: { flag: "USE_GRAPH_CHATBOT", endpoint: "/chat/process", timeout: 60_000 },
-    substitution: { flag: "USE_GRAPH_GROCERY", endpoint: "/substitutions/ingredient", timeout: 60_000 },
+    search: { flag: "USE_GRAPH_SEARCH", endpoint: "/search/hybrid", timeout: 8_000 },
+    feed: { flag: "USE_GRAPH_FEED", endpoint: "/recommend/feed", timeout: 8_000 },
+    mealPlan: { flag: "USE_GRAPH_MEAL_PLAN", endpoint: "/recommend/meal-candidates", timeout: 10_000 },
+    grocery: { flag: "USE_GRAPH_GROCERY", endpoint: "/recommend/products", timeout: 8_000 },
+    scanner: { flag: "USE_GRAPH_SCANNER", endpoint: "/recommend/alternatives", timeout: 8_000 },
+    mealLog: { flag: "USE_GRAPH_MEAL_LOG", endpoint: "/analytics/meal-patterns", timeout: 8_000 },
+    chatbot: { flag: "USE_GRAPH_CHATBOT", endpoint: "/chat/process", timeout: 15_000 },
+    substitution: { flag: "USE_GRAPH_GROCERY", endpoint: "/substitutions/ingredient", timeout: 8_000 },
 } as const;
-// ⚠️ Testing timeouts above — prod values: search/feed/grocery/scanner/mealLog=3s, mealPlan=5s, chatbot=10s
 
 // ── Circuit Breaker Constants ────────────────────────────
 

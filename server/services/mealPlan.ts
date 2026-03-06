@@ -128,6 +128,74 @@ function buildRuleBasedSwapFallback(
   };
 }
 
+// ── Plan Name Builder ───────────────────────────────────────────────────────
+
+function buildPlanName(input: {
+  startDate: string;
+  endDate: string;
+  preferences?: { prompt?: string; cuisines?: string[] };
+  budgetAmount?: number;
+  memberDiets: string[];
+}): string {
+  const parts: string[] = [];
+
+  // Extract keywords from user prompt
+  if (input.preferences?.prompt) {
+    const p = input.preferences.prompt.toLowerCase();
+    const keywords: string[] = [];
+    if (/high.?protein/i.test(p)) keywords.push("High Protein");
+    if (/low.?cal/i.test(p) || /low.?calorie/i.test(p)) keywords.push("Low Calorie");
+    if (/low.?carb/i.test(p)) keywords.push("Low Carb");
+    if (/low.?fat/i.test(p)) keywords.push("Low Fat");
+    if (/healthy/i.test(p)) keywords.push("Healthy");
+    if (/quick|fast|easy/i.test(p)) keywords.push("Quick & Easy");
+    if (/budget|cheap|affordable/i.test(p) || /under \$?\d+/i.test(p)) keywords.push("Budget-Friendly");
+    if (/family/i.test(p)) keywords.push("Family");
+    if (/keto/i.test(p)) keywords.push("Keto");
+    if (keywords.length > 0) parts.push(keywords.slice(0, 3).join(" "));
+  }
+
+  // Add diet preference
+  if (input.memberDiets.length > 0 && !parts.some((p) => /vegan|vegetarian|keto/i.test(p))) {
+    const primaryDiet = input.memberDiets[0];
+    if (primaryDiet) parts.push(primaryDiet);
+  }
+
+  // Add cuisine if specified
+  if (input.preferences?.cuisines?.length) {
+    const c = input.preferences.cuisines[0];
+    if (c && !parts.some((p) => p.toLowerCase().includes(c.toLowerCase()))) {
+      parts.push(c);
+    }
+  }
+
+  // Add budget tag if not already from prompt
+  if (input.budgetAmount && !parts.some((p) => /budget/i.test(p))) {
+    parts.push("Budget-Friendly");
+  }
+
+  // Fallback
+  if (parts.length === 0) parts.push("Weekly Meal");
+  parts.push("Plan");
+
+  // Add date range suffix (compact: "Mar 9–15")
+  try {
+    const start = new Date(input.startDate + "T00:00:00");
+    const end = new Date(input.endDate + "T00:00:00");
+    const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const sameMonth = start.getMonth() === end.getMonth();
+    const dateStr = sameMonth
+      ? `${monthNames[start.getMonth()]} ${start.getDate()}–${end.getDate()}`
+      : `${monthNames[start.getMonth()]} ${start.getDate()} – ${monthNames[end.getMonth()]} ${end.getDate()}`;
+    parts.push(`· ${dateStr}`);
+  } catch {
+    // If date parsing fails, just use the raw dates
+    parts.push(`· ${input.startDate} to ${input.endDate}`);
+  }
+
+  return parts.join(" ");
+}
+
 // ── Fetch Recipe Catalog ────────────────────────────────────────────────────
 
 async function fetchRecipeCatalog(params: {
@@ -135,6 +203,7 @@ async function fetchRecipeCatalog(params: {
   maxCookTime?: number;
   excludeIds: string[];
   limit: number;
+  memberDiets?: string[];
 }): Promise<RecipeOption[]> {
   let query = `
     SELECT
@@ -192,7 +261,7 @@ async function fetchRecipeCatalog(params: {
 
   const rows = (await executeRaw(query, queryParams)) as any[];
 
-  return rows.map((r) => ({
+  let results = rows.map((r) => ({
     id: r.id,
     title: r.title,
     mealType: r.meal_type,
@@ -205,6 +274,25 @@ async function fetchRecipeCatalog(params: {
     allergens: r.allergen_codes || [],
     diets: r.diet_codes || [],
   }));
+
+  // Diet compliance filter: drop recipes with meat/fish titles for vegan/vegetarian
+  if (params.memberDiets && params.memberDiets.length > 0) {
+    const dietSet = new Set(params.memberDiets.map((d) => d.toLowerCase()));
+    const isVegDiet = dietSet.has("vegan") || dietSet.has("vegetarian");
+    if (isVegDiet) {
+      const BLOCKLIST = [
+        "chicken", "beef", "pork", "lamb", "turkey", "duck", "steak",
+        "bacon", "ham", "sausage", "venison", "fish", "salmon", "tuna",
+        "shrimp", "lobster", "crab", "scallop", "meat", "seafood",
+      ];
+      results = results.filter((r) => {
+        const title = r.title.toLowerCase();
+        return !BLOCKLIST.some((term) => title.includes(term));
+      });
+    }
+  }
+
+  return results;
 }
 
 // ── Graph-Scored Recipe Candidates (PRD-12) ─────────────────────────────────
@@ -212,7 +300,7 @@ async function fetchRecipeCatalog(params: {
 async function getRecipeCandidates(
   b2cCustomerId: string,
   members: MemberContext[],
-  params: { cuisineIds?: string[]; maxCookTime?: number; excludeIds: string[]; limit: number }
+  params: { cuisineIds?: string[]; maxCookTime?: number; excludeIds: string[]; limit: number; memberDiets?: string[] }
 ): Promise<RecipeOption[]> {
   // Try RAG-scored candidates first
   const graphCandidates = await ragMealCandidates({
@@ -233,24 +321,34 @@ async function getRecipeCandidates(
   });
 
   if (graphCandidates && graphCandidates.candidates.length > 0) {
-    return graphCandidates.candidates.map((c: any) => ({
-      id: c.recipe_id,
-      title: c.title,
-      mealType: c.meal_type ?? null,
-      cuisine: c.cuisine ?? null,
-      calories: c.calories ?? 0,
-      proteinG: c.protein_g ?? 0,
-      carbsG: c.carbs_g ?? 0,
-      fatG: c.fat_g ?? 0,
-      cookTimeMinutes: c.cook_time_minutes ?? null,
-      allergens: c.allergens ?? [],
-      diets: c.diets ?? [],
-      graphScore: c.score,
-      graphReasons: c.reasons,
-    }));
+    // Validate that candidate IDs are real UUIDs before using them
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const hasValidIds = graphCandidates.candidates.every(
+      (c: any) => c.recipe_id && UUID_RE.test(c.recipe_id)
+    );
+
+    if (hasValidIds) {
+      return graphCandidates.candidates.map((c: any) => ({
+        id: c.recipe_id,
+        title: c.title,
+        mealType: c.meal_type ?? null,
+        cuisine: c.cuisine ?? null,
+        calories: c.calories ?? 0,
+        proteinG: c.protein_g ?? 0,
+        carbsG: c.carbs_g ?? 0,
+        fatG: c.fat_g ?? 0,
+        cookTimeMinutes: c.cook_time_minutes ?? null,
+        allergens: c.allergens ?? [],
+        diets: c.diets ?? [],
+        graphScore: c.score,
+        graphReasons: c.reasons,
+      }));
+    } else {
+      console.warn("[RAG] Meal candidates have non-UUID IDs, falling back to SQL catalog");
+    }
   }
 
-  // SQL fallback — existing fetchRecipeCatalog()
+  // SQL fallback — existing fetchRecipeCatalog() with diet filtering
   return fetchRecipeCatalog(params);
 }
 
@@ -324,11 +422,15 @@ export async function generateMealPlan(
     ? await resolveCuisineIds(preferredCuisines)
     : [];
 
+  // Collect all member diets for candidate filtering
+  const allMemberDiets = [...new Set(members.flatMap((m) => m.diets))];
+
   let recipeCatalog = await getRecipeCandidates(b2cCustomerId, members, {
     cuisineIds,
     maxCookTime: input.preferences?.maxCookTime,
     excludeIds: allExcluded,
     limit: maxRecipes,
+    memberDiets: allMemberDiets,
   });
   let cuisineFallbackApplied = preferredCuisines.length > 0 && cuisineIds.length === 0;
 
@@ -338,6 +440,7 @@ export async function generateMealPlan(
       maxCookTime: input.preferences?.maxCookTime,
       excludeIds: allExcluded,
       limit: maxRecipes,
+      memberDiets: allMemberDiets,
     });
     cuisineFallbackApplied = recipeCatalog.length > 0;
   }
@@ -359,6 +462,7 @@ export async function generateMealPlan(
     excludeRecipeIds: allExcluded,
     maxCookTime: input.preferences?.maxCookTime,
     preferredCuisines,
+    userPrompt: input.preferences?.prompt,
   };
 
   let llmResult: LLMPlanResponse;
@@ -382,6 +486,15 @@ export async function generateMealPlan(
     (m) => validRecipeIds.has(m.recipeId) && allowedMealTypes.has(m.mealType)
   );
 
+  console.log("[MealPlan] Validation:", {
+    totalLLMMeals: llmResult.meals.length,
+    validMeals: validatedMeals.length,
+    invalidRecipeIds: normalizedMeals
+      .filter((m) => !validRecipeIds.has(m.recipeId))
+      .map((m) => m.recipeId)
+      .slice(0, 5),
+  });
+
   if (validatedMeals.length === 0) {
     const fallback = buildRuleBasedFallbackPlan(
       llmContext,
@@ -403,82 +516,105 @@ export async function generateMealPlan(
   let totalCost = 0;
   let totalCalories = 0;
 
+  console.log("[MealPlan] Fetching nutrition for", validatedMeals.length, "unique recipes…");
   const nutritionSnapshots = new Map<string, NutritionSnapshot>();
   const uniqueRecipeIds = [...new Set(validatedMeals.map((m) => m.recipeId))];
   for (const rid of uniqueRecipeIds) {
     nutritionSnapshots.set(rid, await getRecipeNutrition(rid));
   }
+  console.log("[MealPlan] Nutrition fetched for", nutritionSnapshots.size, "recipes");
 
-  const planRows = await db
-    .insert(mealPlans)
-    .values({
-      householdId: household.id,
-      b2cCustomerId,
-      planName: `Meal Plan ${input.startDate} to ${input.endDate}`,
-      startDate: input.startDate,
-      endDate: input.endDate,
-      status: "draft",
-      mealsPerDay: input.mealsPerDay,
-      generationParams: llmContext as any,
-      aiModel: getLLMModelName(),
-      budgetAmount: input.budgetAmount ? String(input.budgetAmount) : null,
-      budgetCurrency: input.budgetCurrency ?? "USD",
-      memberIds: input.memberIds,
-      generationTimeMs,
-    })
-    .returning();
+  try {
+    console.log("[MealPlan] Inserting meal plan into DB…");
+    const planRows = await db
+      .insert(mealPlans)
+      .values({
+        householdId: household.id,
+        b2cCustomerId,
+        planName: buildPlanName({
+          startDate: input.startDate,
+          endDate: input.endDate,
+          preferences: input.preferences,
+          budgetAmount: input.budgetAmount,
+          memberDiets: allMemberDiets,
+        }),
+        startDate: input.startDate,
+        endDate: input.endDate,
+        status: "draft",
+        mealsPerDay: input.mealsPerDay,
+        generationParams: llmContext as any,
+        aiModel: getLLMModelName(),
+        budgetAmount: input.budgetAmount ? String(input.budgetAmount) : null,
+        budgetCurrency: input.budgetCurrency ?? "USD",
+        memberIds: input.memberIds,
+        generationTimeMs,
+      })
+      .returning();
 
-  const plan = planRows[0];
+    const plan = planRows[0];
+    console.log("[MealPlan] Plan inserted:", plan.id);
 
-  const itemValues = validatedMeals.map((meal) => {
-    const nutrition = nutritionSnapshots.get(meal.recipeId)!;
-    const cost = meal.estimatedCost ?? null;
-    if (cost) totalCost += cost;
-    totalCalories += nutrition.calories * (meal.servings || 1);
+    const itemValues = validatedMeals.map((meal) => {
+      const nutrition = nutritionSnapshots.get(meal.recipeId);
+      if (!nutrition) {
+        console.error("[MealPlan] Missing nutrition for recipeId:", meal.recipeId);
+      }
+      const safeNutrition = nutrition || { calories: 0, proteinG: 0, carbsG: 0, fatG: 0, fiberG: 0, sugarG: 0, sodiumMg: 0 };
+      const cost = meal.estimatedCost ?? null;
+      if (cost) totalCost += cost;
+      totalCalories += safeNutrition.calories * (meal.servings || 1);
+
+      return {
+        mealPlanId: plan.id,
+        recipeId: meal.recipeId,
+        mealDate: meal.date,
+        mealType: meal.mealType,
+        servings: meal.servings || 1,
+        forMemberIds: input.memberIds,
+        estimatedCost: cost ? String(cost) : null,
+        caloriesPerServing: safeNutrition.calories,
+        status: "planned" as const,
+        nutritionSnapshot: safeNutrition as any,
+      };
+    });
+
+    console.log("[MealPlan] Inserting", itemValues.length, "meal items…");
+    const insertedItems = await db.insert(mealPlanItems).values(itemValues).returning();
+    console.log("[MealPlan] Items inserted:", insertedItems.length);
+
+    await db
+      .update(mealPlans)
+      .set({
+        totalEstimatedCost: totalCost > 0 ? String(totalCost) : null,
+        totalCalories,
+      })
+      .where(eq(mealPlans.id, plan.id));
+    console.log("[MealPlan] Plan updated with totals");
+
+    const hydratedItems = await hydrateItems(insertedItems);
+    console.log("[MealPlan] Hydration complete");
 
     return {
-      mealPlanId: plan.id,
-      recipeId: meal.recipeId,
-      mealDate: meal.date,
-      mealType: meal.mealType,
-      servings: meal.servings || 1,
-      forMemberIds: input.memberIds,
-      estimatedCost: cost ? String(cost) : null,
-      caloriesPerServing: nutrition.calories,
-      status: "planned" as const,
-      nutritionSnapshot: nutrition as any,
+      plan: { ...plan, totalEstimatedCost: totalCost > 0 ? String(totalCost) : null, totalCalories },
+      items: hydratedItems,
+      generationTimeMs,
+      summary: (() => {
+        let out = llmResult.planSummary;
+        if (llmFallbackApplied) {
+          out = `${out} Note: AI planner fallback was used due to provider unavailability.`;
+        }
+        if (cuisineFallbackApplied) {
+          out = `${out} Note: preferred cuisines were unavailable, so broader recipes were used.`;
+        }
+        return out;
+      })(),
     };
-  });
-
-  const insertedItems = await db.insert(mealPlanItems).values(itemValues).returning();
-
-  await db
-    .update(mealPlans)
-    .set({
-      totalEstimatedCost: totalCost > 0 ? String(totalCost) : null,
-      totalCalories,
-    })
-    .where(eq(mealPlans.id, plan.id));
-
-  const hydratedItems = await hydrateItems(insertedItems);
-
-  return {
-    plan: { ...plan, totalEstimatedCost: totalCost > 0 ? String(totalCost) : null, totalCalories },
-    items: hydratedItems,
-    generationTimeMs,
-    summary: (() => {
-      let out = llmResult.planSummary;
-      if (llmFallbackApplied) {
-        out = `${out} Note: AI planner fallback was used due to provider unavailability.`;
-      }
-      if (cuisineFallbackApplied) {
-        out = `${out} Note: preferred cuisines were unavailable, so broader recipes were used.`;
-      }
-      return out;
-    })(),
-  };
+  } catch (dbError: any) {
+    console.error("[MealPlan] Post-LLM DB operation failed:", dbError?.message || dbError);
+    console.error("[MealPlan] Full error:", dbError);
+    throw dbError;
+  }
 }
-
 // ── List Plans ──────────────────────────────────────────────────────────────
 
 export async function listPlans(
@@ -738,20 +874,31 @@ export async function regeneratePlan(planId: string, b2cCustomerId: string) {
   return generateMealPlan(b2cCustomerId, newInput);
 }
 
-// ── Delete (Archive) Plan ───────────────────────────────────────────────────
+// ── Delete Plan ─────────────────────────────────────────────────────────────
 
 export async function deletePlan(planId: string) {
-  const updated = await db
-    .update(mealPlans)
-    .set({ status: "archived" })
+  // First check the plan exists
+  const existing = await db
+    .select({ id: mealPlans.id })
+    .from(mealPlans)
     .where(eq(mealPlans.id, planId))
-    .returning();
+    .limit(1);
 
-  if (!updated[0]) {
+  if (!existing[0]) {
     const err = new Error("Meal plan not found");
     (err as any).status = 404;
     throw err;
   }
+
+  // Delete child items first (FK constraint)
+  await db
+    .delete(mealPlanItems)
+    .where(eq(mealPlanItems.mealPlanId, planId));
+
+  // Hard-delete the plan
+  await db
+    .delete(mealPlans)
+    .where(eq(mealPlans.id, planId));
 
   return { success: true };
 }

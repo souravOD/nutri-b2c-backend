@@ -266,16 +266,30 @@ export async function getPersonalizedFeedWithRAG(
 
   if (graphFeed && graphFeed.results.length > 0) {
     // Graph returned scored + explained results — hydrate from PG
-    const ids = graphFeed.results.map(r => r.id);
-    const hydrated = await hydrateRecipesByIds(ids);
-    const nutritionMap = await getRecipeNutritionMap(ids);
-    const allergenMap = await getRecipeAllergenMap(ids);
+    try {
+      const ids = graphFeed.results.map(r => r.id);
+      const hydrated = await hydrateRecipesByIds(ids);
 
-    return hydrated.map((recipe, i) => ({
-      recipe: mapFeedRecipe(recipe, nutritionMap, allergenMap),
-      score: graphFeed.results[i]?.score ?? 0,
-      reasons: graphFeed.results[i]?.reasons ?? [],
-    }));
+      // hydrateRecipesByIds already returns camelCase recipe objects
+      // (with imageUrl, nutrition, allergens etc.) — use them directly.
+      const ragResults: FeedResult[] = hydrated.map((recipe, i) => ({
+        recipe,
+        score: graphFeed.results[i]?.score ?? 0,
+        reasons: graphFeed.results[i]?.reasons ?? [],
+      }));
+
+      // Supplement with SQL results if RAG returned fewer than the limit
+      if (ragResults.length < limit) {
+        const sqlResults = await getPersonalizedFeed(b2cCustomerId, limit - ragResults.length, 0);
+        const ragIdSet = new Set(ragResults.map(r => r.recipe.id));
+        const dedupedSql = sqlResults.filter(r => !ragIdSet.has(r.recipe.id));
+        return [...ragResults, ...dedupedSql].slice(0, limit);
+      }
+
+      return ragResults;
+    } catch (hydrationErr) {
+      console.warn("[RAG] Feed hydration failed (non-UUID IDs?), falling back to SQL:", hydrationErr);
+    }
   }
 
   // SQL fallback — existing logic (popularity + recency)

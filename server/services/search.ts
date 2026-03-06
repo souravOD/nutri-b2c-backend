@@ -316,14 +316,25 @@ export async function searchRecipesWithRAG(
     });
 
     if (ragResult && ragResult.results.length > 0) {
-      // RAG returned results — hydrate with full recipe data from PG
+      // Validate IDs are real UUIDs before hydrating
+      const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
       const ids = ragResult.results.map(r => r.id);
-      const hydrated = await hydrateRecipesByIds(ids);
-      return hydrated.map((recipe, i) => ({
-        recipe,
-        score: ragResult.results[i]?.score ?? 0,
-        reasons: ragResult.results[i]?.reasons ?? [],
-      }));
+      const allValid = ids.every(id => UUID_RE.test(id));
+
+      if (allValid) {
+        try {
+          const hydrated = await hydrateRecipesByIds(ids);
+          return hydrated.map((recipe, i) => ({
+            recipe,
+            score: ragResult.results[i]?.score ?? 0,
+            reasons: ragResult.results[i]?.reasons ?? [],
+          }));
+        } catch (err) {
+          console.warn("[RAG] Search hydration failed, falling back to SQL:", err);
+        }
+      } else {
+        console.warn("[RAG] Search results have non-UUID IDs, falling back to SQL");
+      }
     }
     // ragResult is null or empty → fall through to SQL
   }

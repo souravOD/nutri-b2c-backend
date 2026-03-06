@@ -37,23 +37,46 @@ const NAME = {
 
 export async function getRecipeNutritionMap(recipeIds: string[]) {
   if (!recipeIds.length) return new Map<string, Nutrition>();
+
+  // Use a ranked CTE to prefer per_serving values over per_100g / other bases.
+  // For each (recipe, nutrient), pick the row whose per_amount is closest to
+  // "per_serving", falling back to others if per_serving is absent.
   const rows = await executeRaw(
     `
-    select
-      nf.entity_id as recipe_id,
-      max(case when lower(nd.nutrient_name) = any($2::text[]) then nf.amount end) as calories,
-      max(case when lower(nd.nutrient_name) = any($3::text[]) then nf.amount end) as protein_g,
-      max(case when lower(nd.nutrient_name) = any($4::text[]) then nf.amount end) as carbs_g,
-      max(case when lower(nd.nutrient_name) = any($5::text[]) then nf.amount end) as fat_g,
-      max(case when lower(nd.nutrient_name) = any($6::text[]) then nf.amount end) as fiber_g,
-      max(case when lower(nd.nutrient_name) = any($7::text[]) then nf.amount end) as sugar_g,
-      max(case when lower(nd.nutrient_name) = any($8::text[]) then nf.amount end) as sodium_mg,
-      max(case when lower(nd.nutrient_name) = any($9::text[]) then nf.amount end) as saturated_fat_g
-    from gold.nutrition_facts nf
-    join gold.nutrition_definitions nd on nd.id = nf.nutrient_id
-    where nf.entity_type = 'recipe'
-      and nf.entity_id = any($1::uuid[])
-    group by nf.entity_id
+    WITH ranked AS (
+      SELECT
+        nf.entity_id,
+        nf.nutrient_id,
+        nf.amount,
+        nd.nutrient_name,
+        ROW_NUMBER() OVER (
+          PARTITION BY nf.entity_id, nf.nutrient_id
+          ORDER BY CASE lower(nf.per_amount)
+            WHEN 'per_serving'  THEN 1
+            WHEN 'per serving'  THEN 1
+            WHEN '1 serving'    THEN 1
+            WHEN '100g'         THEN 2
+            ELSE 3
+          END
+        ) AS rn
+      FROM gold.nutrition_facts nf
+      JOIN gold.nutrition_definitions nd ON nd.id = nf.nutrient_id
+      WHERE nf.entity_type = 'recipe'
+        AND nf.entity_id = ANY($1::uuid[])
+    )
+    SELECT
+      entity_id AS recipe_id,
+      max(CASE WHEN lower(nutrient_name) = ANY($2::text[]) THEN amount END) AS calories,
+      max(CASE WHEN lower(nutrient_name) = ANY($3::text[]) THEN amount END) AS protein_g,
+      max(CASE WHEN lower(nutrient_name) = ANY($4::text[]) THEN amount END) AS carbs_g,
+      max(CASE WHEN lower(nutrient_name) = ANY($5::text[]) THEN amount END) AS fat_g,
+      max(CASE WHEN lower(nutrient_name) = ANY($6::text[]) THEN amount END) AS fiber_g,
+      max(CASE WHEN lower(nutrient_name) = ANY($7::text[]) THEN amount END) AS sugar_g,
+      max(CASE WHEN lower(nutrient_name) = ANY($8::text[]) THEN amount END) AS sodium_mg,
+      max(CASE WHEN lower(nutrient_name) = ANY($9::text[]) THEN amount END) AS saturated_fat_g
+    FROM ranked
+    WHERE rn = 1
+    GROUP BY entity_id
     `,
     [
       recipeIds,
@@ -83,12 +106,12 @@ export async function getRecipeNutritionMap(recipeIds: string[]) {
   }
 
   // Fallback: for any recipes not found in nutrition_facts,
-  // try recipe_nutrition_profiles table
+  // try recipe_nutrition_profiles table (prefer per_serving rows)
   const missingIds = recipeIds.filter((id) => !map.has(id));
   if (missingIds.length > 0) {
     const fallbackRows = await executeRaw(
       `
-      SELECT
+      SELECT DISTINCT ON (recipe_id)
         recipe_id,
         calories,
         protein_g,
@@ -100,6 +123,8 @@ export async function getRecipeNutritionMap(recipeIds: string[]) {
         saturated_fat_g
       FROM gold.recipe_nutrition_profiles
       WHERE recipe_id = ANY($1::uuid[])
+      ORDER BY recipe_id,
+               CASE per_basis WHEN 'per_serving' THEN 1 ELSE 2 END
       `,
       [missingIds]
     );
@@ -146,13 +171,13 @@ export async function getRecipeIngredients(recipeId: string) {
   const rows = await executeRaw(
     `
     select
-      i.name,
+      coalesce(i.name, 'Unknown ingredient') as name,
       ri.quantity,
       ri.unit,
       ri.preparation_note,
       ri.ingredient_order
     from gold.recipe_ingredients ri
-    join gold.ingredients i on i.id = ri.ingredient_id
+    left join gold.ingredients i on i.id = ri.ingredient_id
     where ri.recipe_id = $1
     order by ri.ingredient_order asc nulls last, i.name asc
     `,
