@@ -100,6 +100,32 @@ export async function markAllAsRead(customerId: string): Promise<number> {
     return rows.length;
 }
 
+export async function createNotification(input: {
+    customerId: string;
+    type: string;
+    title: string;
+    body?: string;
+    icon?: string;
+    actionUrl?: string;
+}): Promise<Notification> {
+    const rows = await executeRaw(
+        `INSERT INTO gold.b2c_notifications
+             (customer_id, type, title, body, icon, action_url)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id, customer_id, type, title, body, icon, action_url,
+                   is_read, created_at, read_at`,
+        [
+            input.customerId,
+            input.type,
+            input.title,
+            input.body ?? null,
+            input.icon ?? null,
+            input.actionUrl ?? null,
+        ]
+    );
+    return mapRow(rows[0]);
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 function mapRow(row: any): Notification {

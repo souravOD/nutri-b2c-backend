@@ -11,6 +11,7 @@ import {
     markAsRead,
     markAllAsRead,
 } from "../services/notifications.js";
+import { evaluateAndDispatchNotifications } from "../services/notificationEngine.js";
 
 const router = Router();
 router.use(authMiddleware);
@@ -116,6 +117,23 @@ router.post(
             const customerId = b2cId(req);
             const count = await markAllAsRead(customerId);
             res.json({ markedCount: count });
+        } catch (err) {
+            next(err);
+        }
+    }
+);
+
+// ── POST /api/v1/notifications/evaluate ─────────────────────────────────────
+// Login-triggered: evaluate all notification triggers for the current user
+router.post(
+    "/evaluate",
+    rateLimitMiddleware,
+    async (req: Request, res: Response, next: NextFunction) => {
+        try {
+            const customerId = b2cId(req);
+            const clientTimezone = req.headers["x-timezone"] as string | undefined;
+            const result = await evaluateAndDispatchNotifications(customerId, clientTimezone);
+            res.json(result);
         } catch (err) {
             next(err);
         }

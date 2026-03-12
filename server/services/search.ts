@@ -9,6 +9,7 @@ import {
 } from "./b2cTaxonomy.js";
 import { getRecipeAllergenMap, getRecipeNutritionMap, getRecipeIngredients, hydrateRecipesByIds } from "./recipeHydration.js";
 import { ragSearch } from "./ragClient.js";
+import { getMemberPrefs, toRagProfile } from "./memberPrefs.js";
 
 export interface SearchParams {
   q?: string;
@@ -294,8 +295,25 @@ export async function getPopularRecipes(limit: number = 20): Promise<any[]> {
 
 export async function searchRecipesWithRAG(
   params: SearchParams,
-  b2cCustomerId?: string
+  b2cCustomerId?: string,
+  memberId?: string
 ): Promise<SearchResult[]> {
+  // Household: auto-apply member's allergens/diets as search constraints
+  let memberProfile: Record<string, unknown> | undefined;
+  if (memberId) {
+    const prefs = await getMemberPrefs(memberId);
+    memberProfile = toRagProfile(prefs);
+    // Safety-critical: merge member's allergens into search exclusions
+    params.allergensExclude = [
+      ...(params.allergensExclude || []),
+      ...prefs.allergenIds,
+    ];
+    // Merge member's diets into search filters
+    if (prefs.dietIds.length > 0) {
+      params.diets = [...(params.diets || []), ...prefs.dietIds];
+    }
+  }
+
   // Strategy:
   // - NL query (params.q) → try RAG first for semantic+structural search
   // - Filter-only (no free text) → always SQL (faster for indexed columns)
@@ -312,7 +330,9 @@ export async function searchRecipesWithRAG(
         calMax: params.calMax,
         timeMax: params.timeMax,
       },
-      customer_id: b2cCustomerId,
+      customer_id: memberId || b2cCustomerId,
+      member_id: memberId,
+      member_profile: memberProfile,
     });
 
     if (ragResult && ragResult.results.length > 0) {

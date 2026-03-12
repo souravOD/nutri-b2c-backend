@@ -1,5 +1,5 @@
 import { db, executeRaw } from "../config/database.js";
-import { eq, and, desc } from "drizzle-orm";
+import { eq, and, desc, sql } from "drizzle-orm";
 import {
   mealPlans,
   mealPlanItems,
@@ -12,6 +12,7 @@ import {
   getMemberHealthProfiles,
   type MemberHealthProfile,
 } from "./household.js";
+import { getRecipeNutritionMap } from "./recipeHydration.js";
 import { getLowRatedRecipeIds } from "./recipeRating.js";
 import {
   generateMealPlanWithLLM,
@@ -362,16 +363,31 @@ async function getRecipeNutrition(recipeId: string): Promise<NutritionSnapshot> 
     .limit(1);
 
   const r = rows[0];
-  if (!r) return { calories: 0, proteinG: 0, carbsG: 0, fatG: 0, fiberG: 0, sugarG: 0, sodiumMg: 0 };
+  if (r && n(r.calories) > 0) {
+    return {
+      calories: Math.round(n(r.calories)),
+      proteinG: Math.round(n(r.proteinG) * 100) / 100,
+      carbsG: Math.round(n(r.totalCarbsG) * 100) / 100,
+      fatG: Math.round(n(r.totalFatG) * 100) / 100,
+      fiberG: Math.round(n(r.dietaryFiberG) * 100) / 100,
+      sugarG: Math.round(n(r.totalSugarsG) * 100) / 100,
+      sodiumMg: Math.round(n(r.sodiumMg)),
+    };
+  }
+
+  // Fallback: use nutrition_facts + nutrition_definitions (same source as recipe detail drawer)
+  const nutritionMap = await getRecipeNutritionMap([recipeId]);
+  const nf = nutritionMap.get(recipeId);
+  if (!nf) return { calories: 0, proteinG: 0, carbsG: 0, fatG: 0, fiberG: 0, sugarG: 0, sodiumMg: 0 };
 
   return {
-    calories: Math.round(n(r.calories)),
-    proteinG: Math.round(n(r.proteinG) * 100) / 100,
-    carbsG: Math.round(n(r.totalCarbsG) * 100) / 100,
-    fatG: Math.round(n(r.totalFatG) * 100) / 100,
-    fiberG: Math.round(n(r.dietaryFiberG) * 100) / 100,
-    sugarG: Math.round(n(r.totalSugarsG) * 100) / 100,
-    sodiumMg: Math.round(n(r.sodiumMg)),
+    calories: Math.round(n(nf.calories)),
+    proteinG: Math.round(n(nf.protein_g) * 100) / 100,
+    carbsG: Math.round(n(nf.carbs_g) * 100) / 100,
+    fatG: Math.round(n(nf.fat_g) * 100) / 100,
+    fiberG: Math.round(n(nf.fiber_g) * 100) / 100,
+    sugarG: Math.round(n(nf.sugar_g) * 100) / 100,
+    sodiumMg: Math.round(n(nf.sodium_mg)),
   };
 }
 
@@ -621,13 +637,18 @@ export async function listPlans(
   b2cCustomerId: string,
   status?: string,
   limit = 20,
-  offset = 0
+  offset = 0,
+  memberId?: string
 ) {
   const household = await getOrCreateHousehold(b2cCustomerId);
 
   let conditions = [eq(mealPlans.householdId, household.id)];
   if (status) {
     conditions.push(eq(mealPlans.status, status));
+  }
+  if (memberId) {
+    // PostgreSQL: member_ids @> ARRAY[memberId]::uuid[]
+    conditions.push(sql`${mealPlans.memberIds} @> ARRAY[${memberId}]::uuid[]`);
   }
 
   const plans = await db
@@ -662,6 +683,28 @@ export async function getPlanDetail(planId: string) {
     .where(eq(mealPlanItems.mealPlanId, planId))
     .orderBy(mealPlanItems.mealDate, mealPlanItems.mealType);
 
+  // Self-heal: backfill items missing caloriesPerServing
+  const nullCalItems = items.filter((i) => (i.caloriesPerServing == null || i.caloriesPerServing === 0) && i.recipeId);
+  if (nullCalItems.length > 0) {
+    for (const item of nullCalItems) {
+      try {
+        const nutrition = await getRecipeNutrition(item.recipeId!);
+        if (nutrition.calories > 0) {
+          await db
+            .update(mealPlanItems)
+            .set({
+              caloriesPerServing: nutrition.calories,
+              nutritionSnapshot: nutrition as any,
+            })
+            .where(eq(mealPlanItems.id, item.id));
+          // Patch the in-memory item so hydrated response is correct
+          item.caloriesPerServing = nutrition.calories;
+          item.nutritionSnapshot = nutrition as any;
+        }
+      } catch { /* silent */ }
+    }
+  }
+
   const hydratedItems = await hydrateItems(items);
 
   return { plan: planRows[0], items: hydratedItems };
@@ -672,15 +715,45 @@ export async function getPlanDetail(planId: string) {
 export async function activatePlan(planId: string, b2cCustomerId: string) {
   const household = await getOrCreateHousehold(b2cCustomerId);
 
-  await db
-    .update(mealPlans)
-    .set({ status: "archived" })
-    .where(
-      and(
-        eq(mealPlans.householdId, household.id),
-        eq(mealPlans.status, "active")
-      )
-    );
+  // Fetch the plan being activated to know its memberIds
+  const planToActivate = await db
+    .select({ memberIds: mealPlans.memberIds })
+    .from(mealPlans)
+    .where(eq(mealPlans.id, planId))
+    .limit(1);
+
+  if (!planToActivate[0]) {
+    const err = new Error("Meal plan not found");
+    (err as any).status = 404;
+    throw err;
+  }
+
+  const targetMemberIds = planToActivate[0].memberIds ?? [];
+
+  // Archive only active plans whose memberIds overlap with this plan's memberIds
+  if (targetMemberIds.length > 0) {
+    await db
+      .update(mealPlans)
+      .set({ status: "archived" })
+      .where(
+        and(
+          eq(mealPlans.householdId, household.id),
+          eq(mealPlans.status, "active"),
+          sql`${mealPlans.memberIds} && ARRAY[${sql.join(targetMemberIds.map(id => sql`${id}`), sql`,`)}]::uuid[]`
+        )
+      );
+  } else {
+    // Fallback: archive all active plans for this household
+    await db
+      .update(mealPlans)
+      .set({ status: "archived" })
+      .where(
+        and(
+          eq(mealPlans.householdId, household.id),
+          eq(mealPlans.status, "active")
+        )
+      );
+  }
 
   const updated = await db
     .update(mealPlans)
@@ -938,6 +1011,138 @@ export async function logMealFromPlan(
     .where(eq(mealPlanItems.id, itemId));
 
   return { mealLogItem: result.item, planItem: { ...item, status: "cooked" } };
+}
+
+// ── Add Item to Plan ────────────────────────────────────────────────────────
+
+export async function addItemToPlan(
+  planId: string,
+  b2cCustomerId: string,
+  input: { recipeId: string; mealDate: string; mealType: string; servings?: number; replaceItemId?: string }
+) {
+  const planRows = await db
+    .select()
+    .from(mealPlans)
+    .where(eq(mealPlans.id, planId))
+    .limit(1);
+
+  if (!planRows[0]) {
+    const err = new Error("Meal plan not found");
+    (err as any).status = 404;
+    throw err;
+  }
+
+  const plan = planRows[0];
+
+  // If substituting, delete the old item first
+  if (input.replaceItemId) {
+    await db
+      .delete(mealPlanItems)
+      .where(
+        and(
+          eq(mealPlanItems.id, input.replaceItemId),
+          eq(mealPlanItems.mealPlanId, planId)
+        )
+      );
+  }
+
+  // Verify recipe exists
+  const recipeRows = await db
+    .select({ id: recipes.id })
+    .from(recipes)
+    .where(eq(recipes.id, input.recipeId))
+    .limit(1);
+
+  if (!recipeRows[0]) {
+    const err = new Error("Recipe not found");
+    (err as any).status = 404;
+    throw err;
+  }
+
+  const nutrition = await getRecipeNutrition(input.recipeId);
+  const servings = input.servings ?? 1;
+
+  const insertedRows = await db
+    .insert(mealPlanItems)
+    .values({
+      mealPlanId: planId,
+      recipeId: input.recipeId,
+      mealDate: input.mealDate,
+      mealType: input.mealType,
+      servings,
+      forMemberIds: plan.memberIds ?? [],
+      caloriesPerServing: nutrition.calories,
+      nutritionSnapshot: nutrition as any,
+      status: "planned" as const,
+    })
+    .returning();
+
+  const hydratedItems = await hydrateItems(insertedRows);
+  return { item: hydratedItems[0] };
+}
+
+// ── Delete Item from Plan ───────────────────────────────────────────────────
+
+export async function deleteItemFromPlan(planId: string, itemId: string) {
+  const deleted = await db
+    .delete(mealPlanItems)
+    .where(
+      and(
+        eq(mealPlanItems.id, itemId),
+        eq(mealPlanItems.mealPlanId, planId)
+      )
+    )
+    .returning({ id: mealPlanItems.id });
+
+  if (!deleted[0]) {
+    const err = new Error("Meal plan item not found");
+    (err as any).status = 404;
+    throw err;
+  }
+
+  return { deleted: true, itemId };
+}
+
+// ── Reorder Items ───────────────────────────────────────────────────────────
+
+export async function reorderItems(
+  planId: string,
+  moves: { itemId: string; mealDate: string; mealType: string }[]
+) {
+  const planRows = await db
+    .select()
+    .from(mealPlans)
+    .where(eq(mealPlans.id, planId))
+    .limit(1);
+
+  if (!planRows[0]) {
+    const err = new Error("Meal plan not found");
+    (err as any).status = 404;
+    throw err;
+  }
+
+  const updatedItems: any[] = [];
+
+  for (const move of moves) {
+    const updated = await db
+      .update(mealPlanItems)
+      .set({
+        mealDate: move.mealDate,
+        mealType: move.mealType,
+      })
+      .where(
+        and(
+          eq(mealPlanItems.id, move.itemId),
+          eq(mealPlanItems.mealPlanId, planId)
+        )
+      )
+      .returning();
+
+    if (updated[0]) updatedItems.push(updated[0]);
+  }
+
+  const hydratedItems = await hydrateItems(updatedItems);
+  return { items: hydratedItems };
 }
 
 // ── Hydrate Items with Recipe Data ──────────────────────────────────────────

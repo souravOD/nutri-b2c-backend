@@ -46,8 +46,10 @@ router.get("/", rateLimitMiddleware, async (req, res, next) => {
     };
 
     // PRD-10: Use graph-enhanced search (RAG → SQL fallback)
+    // Household: pass ?memberId=xxx to auto-apply member's allergen/diet constraints
     const b2cCustomerId = (req as any).user?.b2cCustomerId as string | undefined;
-    const results = await searchRecipesWithRAG(searchParams, b2cCustomerId);
+    const memberId = req.query.memberId as string | undefined;
+    const results = await searchRecipesWithRAG(searchParams, b2cCustomerId, memberId);
     res.json(results);
   } catch (error) {
     next(error);

@@ -77,10 +77,29 @@ export async function authMiddleware(
     (req as any).user = {
       ...ctx,
       b2cCustomerId: customer?.id ?? undefined,
+      householdRole: customer?.householdRole ?? undefined,
+      householdId: customer?.householdId ?? undefined,
     } as UserContext;
 
     // Set effective user for DB/RLS context
     await setCurrentUser(ctx.effectiveUserId ?? ctx.userId);
+
+    // ── Timezone auto-detection from client header ──
+    const clientTimezone = req.headers["x-timezone"] as string | undefined;
+    if (clientTimezone && customer?.id) {
+      // Fire-and-forget: update household timezone if still UTC
+      import("../config/database.js").then(({ executeRaw }) => {
+        executeRaw(
+          `UPDATE gold.households h
+           SET timezone = $1
+           FROM gold.b2c_customers c
+           WHERE h.id = c.household_id
+             AND c.id = $2
+             AND h.timezone = 'UTC'`,
+          [clientTimezone, customer!.id]
+        ).catch(() => { /* ignore tz update failures */ });
+      });
+    }
 
     return next();
   } catch (error: any) {

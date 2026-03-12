@@ -16,17 +16,19 @@ function b2cId(req: Request): string {
 const chatMessageSchema = z.object({
     message: z.string().min(1).max(500),
     sessionId: z.string().uuid().optional(),
+    memberId: z.string().uuid().optional(),
 });
 
 // POST /api/v1/chat — send a message
+// Household: pass memberId in body to personalize for a specific household member
 router.post(
     "/",
     rateLimitMiddleware,
     async (req: Request, res: Response, next: NextFunction) => {
         try {
             const customerId = b2cId(req);
-            const { message, sessionId } = chatMessageSchema.parse(req.body);
-            const response = await processMessage(customerId, message.trim(), sessionId);
+            const { message, sessionId, memberId } = chatMessageSchema.parse(req.body);
+            const response = await processMessage(customerId, message.trim(), sessionId, memberId);
             res.json(response);
         } catch (err) {
             next(err);

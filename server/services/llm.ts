@@ -153,10 +153,10 @@ export async function analyzeRecipeWithLLM(text: string): Promise<LLMAnalysisRes
       stream: false,
     }, { timeout: 60000 });
 
-    console.log("[LLM] Received response:", { 
+    console.log("[LLM] Received response:", {
       hasContent: !!response.choices[0]?.message?.content,
       finishReason: response.choices[0]?.finish_reason,
-      model: response.model 
+      model: response.model
     });
 
     const content = response.choices[0]?.message?.content;
@@ -264,5 +264,101 @@ export async function extractTextFromImage(imageBuffer: Buffer): Promise<string>
   } catch (error: any) {
     console.error("[LLM] Image OCR failed:", error?.message || error);
     throw new Error(`Image OCR failed: ${error?.message || "Unknown error"}`);
+  }
+}
+
+// ─── Visual Food Analysis (Vision API — direct image → JSON) ──────────────────
+
+const VISUAL_FOOD_ANALYSIS_PROMPT = `You are a nutrition expert with food image recognition expertise. Look at the food image and identify what dish(es) or food items are shown in the photo.
+
+Based on what you visually identify, estimate the recipe details and return structured JSON.
+
+Required JSON schema:
+{"title":"string","servings":int,"ingredients":[{"qty":number|null,"unit":"string|null","item":"string","calories_per_unit":number,"protein_g":number,"carbs_g":number,"fat_g":number,"sodium_mg":number,"sugar_g":number,"fiber_g":number}],"steps":["string"],"nutrition_per_serving":{"calories":int,"protein_g":number,"carbs_g":number,"fat_g":number,"sodium_mg":number,"sugar_g":number,"fiber_g":number,"potassium_mg":number,"iron_mg":number,"calcium_mg":number,"vitamin_d_mcg":number},"allergens":["string"],"diets_compatible":["string"],"diets_incompatible":["string"],"suggestions":["string"],"cuisine":"string","difficulty":"easy|medium|hard","prep_time_minutes":int,"cook_time_minutes":int}
+
+Rules:
+- Identify the dish from the image visually (color, texture, shape, plating)
+- Estimate likely ingredients based on the identified dish
+- Estimate nutrition per serving based on standard recipe data for that dish
+- Allergens to check: gluten, dairy, eggs, fish, shellfish, tree nuts, peanuts, soy, sesame
+- Diets: vegan, vegetarian, gluten-free, keto, paleo, etc.
+- If multiple dishes are visible, focus on the main/largest one
+- 2-4 healthier substitution suggestions
+- Return ONLY valid JSON`;
+
+/**
+ * Analyze a food image visually — identifies the dish and estimates recipe data.
+ * Used as fallback when OCR finds insufficient text (i.e. photo of actual food).
+ */
+export async function analyzeImageVisually(imageBuffer: Buffer): Promise<LLMAnalysisResult> {
+  if (!LITELLM_API_KEY_VISION) {
+    throw new Error("LITELLM_API_KEY_VISION is not configured");
+  }
+
+  try {
+    const base64Image = imageBuffer.toString("base64");
+
+    console.log("[LLM] Visual food analysis — sending image to vision model:", { model: LLM_VISION_MODEL });
+
+    const response = await visionClient.chat.completions.create({
+      model: LLM_VISION_MODEL,
+      messages: [
+        {
+          role: "system",
+          content: VISUAL_FOOD_ANALYSIS_PROMPT,
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "Analyze this food image. Identify the dish and provide a complete nutritional analysis.",
+            },
+            {
+              type: "image_url",
+              image_url: {
+                url: `data:image/jpeg;base64,${base64Image}`,
+              },
+            },
+          ],
+        },
+      ],
+      response_format: { type: "json_object" },
+      temperature: 0.2,
+      stream: false,
+    }, { timeout: 90000 }); // 90s for visual analysis
+
+    const content = response.choices[0]?.message?.content;
+    if (!content) {
+      throw new Error("Empty response from Vision API");
+    }
+
+    console.log("[LLM] Visual food analysis response received");
+
+    let parsed: LLMAnalysisResult;
+    try {
+      parsed = JSON.parse(content) as LLMAnalysisResult;
+    } catch (parseError: any) {
+      console.error("[LLM] Visual analysis JSON parse error:", parseError, "Content:", content.substring(0, 500));
+      throw new Error(`Failed to parse visual analysis as JSON: ${parseError?.message}`);
+    }
+
+    // Defaults for missing fields
+    if (!parsed.title) parsed.title = "Identified Dish";
+    if (!parsed.ingredients || !Array.isArray(parsed.ingredients)) parsed.ingredients = [];
+    if (!parsed.nutrition_per_serving) {
+      parsed.nutrition_per_serving = { calories: 0, protein_g: 0, carbs_g: 0, fat_g: 0 };
+    }
+    if (!parsed.servings) parsed.servings = 1;
+    if (!parsed.steps) parsed.steps = [];
+    if (!parsed.allergens) parsed.allergens = [];
+    if (!parsed.diets_compatible) parsed.diets_compatible = [];
+    if (!parsed.diets_incompatible) parsed.diets_incompatible = [];
+    if (!parsed.suggestions) parsed.suggestions = [];
+
+    return parsed;
+  } catch (error: any) {
+    console.error("[LLM] Visual food analysis failed:", error?.message || error);
+    throw new Error(`Visual food analysis failed: ${error?.message || "Unknown error"}`);
   }
 }

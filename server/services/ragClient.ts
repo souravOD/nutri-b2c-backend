@@ -14,7 +14,8 @@ type FeatureName =
     | "scanner"
     | "mealLog"
     | "chatbot"
-    | "substitution";
+    | "substitution"
+    | "notification";
 
 interface FeatureConfig {
     flag: string;
@@ -33,6 +34,7 @@ const FEATURE_CONFIG: Record<FeatureName, FeatureConfig> = {
     mealLog: { flag: "USE_GRAPH_MEAL_LOG", endpoint: "/analytics/meal-patterns", timeout: 8_000 },
     chatbot: { flag: "USE_GRAPH_CHATBOT", endpoint: "/chat/process", timeout: 15_000 },
     substitution: { flag: "USE_GRAPH_GROCERY", endpoint: "/substitutions/ingredient", timeout: 8_000 },
+    notification: { flag: "USE_GRAPH_NOTIFICATION", endpoint: "/notifications/generate", timeout: 5_000 },
 } as const;
 
 // ── Circuit Breaker Constants ────────────────────────────
@@ -276,6 +278,8 @@ export async function ragSearch(params: {
     query?: string;
     filters?: Record<string, unknown>;
     customer_id?: string;
+    member_id?: string;
+    member_profile?: Record<string, unknown>;
 }): Promise<RagSearchResult | null> {
     return callRag<RagSearchResult>("search", params);
 }
@@ -287,11 +291,15 @@ export async function ragFeed(
         allergenIds?: string[];
         conditionIds?: string[];
         dislikes?: string[];
-    }
+    },
+    memberId?: string,
+    memberProfile?: Record<string, unknown>
 ): Promise<RagFeedResult | null> {
     return callRag<RagFeedResult>("feed", {
         customer_id: customerId,
         preferences,
+        ...(memberId ? { member_id: memberId } : {}),
+        ...(memberProfile ? { member_profile: memberProfile } : {}),
     });
 }
 
@@ -313,11 +321,15 @@ export async function ragMealCandidates(params: {
 
 export async function ragProducts(
     ingredientIds: string[],
-    customerAllergens: string[]
+    customerAllergens: string[],
+    certificationCategories?: string[],
+    preferredBrands?: string[]
 ): Promise<RagProductsResult | null> {
     return callRag<RagProductsResult>("grocery", {
         ingredient_ids: ingredientIds,
         customer_allergens: customerAllergens,
+        quality_preferences: certificationCategories ?? [],
+        preferred_brands: preferredBrands ?? [],
     });
 }
 
@@ -344,12 +356,16 @@ export async function ragMealPatterns(
 export async function ragChat(
     message: string,
     customerId: string,
-    sessionId?: string | null
+    sessionId?: string | null,
+    memberId?: string,
+    memberProfile?: Record<string, unknown>
 ): Promise<RagChatResult | null> {
     return callRag<RagChatResult>("chatbot", {
         message,
         customer_id: customerId,
         session_id: sessionId ?? null,
+        ...(memberId ? { member_id: memberId } : {}),
+        ...(memberProfile ? { member_profile: memberProfile } : {}),
     });
 }
 
@@ -405,6 +421,7 @@ export function getCircuitStatus() {
             mealLog: isFeatureEnabled("mealLog"),
             chatbot: isFeatureEnabled("chatbot"),
             substitution: isFeatureEnabled("substitution"),
+            notification: isFeatureEnabled("notification"),
         },
         ragApiUrl: process.env.RAG_API_URL ?? "(not configured)",
     };

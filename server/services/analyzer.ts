@@ -12,10 +12,11 @@ import {
   b2cCustomerHealthConditions,
   healthConditionNutrientThresholds,
   dietIngredientRules,
+  b2cCustomers,
 } from "../../shared/goldSchema.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { eq, and, or, ilike } from "drizzle-orm";
-import { analyzeRecipeWithLLM, extractTextFromImage, type LLMAnalysisResult } from "./llm.js";
+import { analyzeRecipeWithLLM, extractTextFromImage, analyzeImageVisually, type LLMAnalysisResult } from "./llm.js";
 import { createUserRecipe } from "./userContent.js";
 import * as cheerio from "cheerio";
 
@@ -185,15 +186,77 @@ export async function analyzeUrl(
 // ─── Image Analysis ──────────────────────────────────────────────────────────
 
 /**
- * Extract text from image using OCR, then analyze.
+ * Check if OCR text looks like actual recipe content (not descriptive text).
+ * Requires ingredient-like patterns: quantities, units, cooking verbs.
+ */
+function looksLikeRecipeText(text: string): boolean {
+  const lower = text.toLowerCase();
+  // Must have at least 3 of these recipe indicators
+  const indicators = [
+    /\d+\s*(cup|cups|tbsp|tsp|oz|lb|g|kg|ml|liter|tablespoon|teaspoon|ounce|pound)/i,  // measurements
+    /\b(ingredient|ingredients)\b/i,                                                     // "ingredients" header
+    /\b(instruction|instructions|directions|steps|method|preparation)\b/i,               // "instructions" header
+    /\b(preheat|chop|dice|mince|stir|bake|roast|sauté|saute|simmer|boil|fry|grill|mix|whisk|fold|knead|marinate)\b/i, // cooking verbs
+    /\b(salt|pepper|sugar|flour|butter|oil|garlic|onion)\b/i,                            // common ingredients
+    /\d+\s*\/\s*\d+/,                                                                    // fractions like 1/2, 3/4
+    /\b(serving|serves|yield)\b/i,                                                       // serving info
+    /\b(calories|protein|carbs|fat|nutrition)\b/i,                                       // nutrition label text
+  ];
+  const matchCount = indicators.filter((rx) => rx.test(lower)).length;
+  return matchCount >= 3;
+}
+
+/**
+ * Analyze image: try OCR first with strict validation, fallback to visual food analysis.
  */
 export async function analyzeImage(
   imageBuffer: Buffer,
   b2cCustomerId: string,
   memberId?: string
 ): Promise<AnalyzeResult> {
-  const extractedText = await extractTextFromImage(imageBuffer);
-  return analyzeText(extractedText, b2cCustomerId, memberId);
+  const t0 = performance.now();
+
+  // Step 1: Try OCR — only use result if it's actual recipe/label text
+  let extractedText = "";
+  try {
+    extractedText = await extractTextFromImage(imageBuffer);
+    const charCount = extractedText.trim().length;
+    console.log(`[Analyzer] OCR extracted ${charCount} chars`);
+
+    // Strict validation: ≥200 chars AND looks like real recipe text
+    if (charCount >= 200 && looksLikeRecipeText(extractedText)) {
+      console.log("[Analyzer] OCR text passed recipe validation — using text pipeline");
+      return analyzeText(extractedText, b2cCustomerId, memberId);
+    }
+
+    console.log(`[Analyzer] OCR text failed recipe validation (${charCount} chars, recipe=${looksLikeRecipeText(extractedText)}) — using visual analysis`);
+  } catch (err: any) {
+    console.warn("[Analyzer] OCR failed, using visual analysis:", err?.message);
+  }
+
+  // Step 2: Direct visual food analysis (food photo, non-text image, or failed validation)
+  console.log("[Analyzer] Starting visual food analysis");
+  const llmResult = await analyzeImageVisually(imageBuffer);
+  const tVision = performance.now();
+
+  // Run the same post-processing as analyzeText (ingredient matching + warnings)
+  const matchedIngredients = await matchIngredients(llmResult.ingredients || []);
+
+  const targetMemberId = memberId || b2cCustomerId;
+  const [allergenWarnings, healthWarnings] = await Promise.all([
+    generateAllergenWarnings(matchedIngredients, targetMemberId).catch((err) => {
+      console.error("[Analyzer] Allergen warnings failed:", err);
+      return [];
+    }),
+    generateHealthWarnings(llmResult.nutrition_per_serving, targetMemberId).catch((err) => {
+      console.error("[Analyzer] Health warnings failed:", err);
+      return [];
+    }),
+  ]);
+
+  console.log(`[Analyzer] Visual analysis total: ${(performance.now() - t0).toFixed(0)}ms (vision=${(tVision - t0).toFixed(0)}ms)`);
+
+  return convertToAnalyzeResult(llmResult, matchedIngredients, allergenWarnings, healthWarnings);
 }
 
 // ─── Barcode Analysis ────────────────────────────────────────────────────────
@@ -323,7 +386,7 @@ async function generateAllergenWarnings(
     // Find allergens for these ingredients
     // Use ANY with proper array casting (matching codebase pattern)
     if (ingredientNames.length === 0) return [];
-    
+
     const allergenMatches = await executeRaw(
       `
       SELECT DISTINCT
@@ -490,15 +553,47 @@ export async function saveAnalyzedRecipe(
   result: AnalyzeResult,
   b2cCustomerId: string
 ): Promise<{ id: string }> {
+  // ── Nutrition values ─────────────────────────────────────────────────────
+  const cal = result.nutritionPerServing?.calories || 0;
+  const prot = result.nutritionPerServing?.protein_g || 0;
+  const fat = result.nutritionPerServing?.fat_g || 0;
+  const carbs = result.nutritionPerServing?.carbs_g || 0;
+
+  // Compute percent_calories_* using 4-9-4 rule (protein=4cal/g, fat=9cal/g, carbs=4cal/g)
+  const pctProtein = cal > 0 ? Math.round(((prot * 4) / cal) * 100 * 100) / 100 : null;
+  const pctFat = cal > 0 ? Math.round(((fat * 9) / cal) * 100 * 100) / 100 : null;
+  const pctCarbs = cal > 0 ? Math.round(((carbs * 4) / cal) * 100 * 100) / 100 : null;
+
+  // ── Estimate cook/prep time from step count (~15 min/step) ─────────────
+  const stepCount = result.steps?.length || 0;
+  const estimatedTotal = stepCount > 0 ? stepCount * 15 : null;
+  const estimatedPrep = estimatedTotal ? Math.round(estimatedTotal * 0.3) : null;
+  const estimatedCook = estimatedTotal ? Math.round(estimatedTotal * 0.7) : null;
+
+  // ── Fetch user's first name for personalized title ─────────────────────
+  const [user] = await db
+    .select({ firstName: b2cCustomers.firstName })
+    .from(b2cCustomers)
+    .where(eq(b2cCustomers.id, b2cCustomerId))
+    .limit(1);
+  const firstName = user?.firstName ?? null;
+
+  // Build personalized title: "Sourav's Rotisserie Chicken"
+  const rawTitle = result.title || "Untitled Recipe";
+  const personalizedTitle = firstName ? `${firstName}'s ${rawTitle}` : rawTitle;
+
   // Convert AnalyzeResult to userContent format
   const recipeData = {
-    title: result.title || "Untitled Recipe",
+    title: personalizedTitle,
     description: result.summary || "",
     servings: result.servings || 1,
-    prepTimeMinutes: undefined as number | undefined,
-    cookTimeMinutes: undefined as number | undefined,
-    totalTimeMinutes: undefined as number | undefined,
-    difficulty: result.inferred?.diets?.[0] || undefined,
+    prepTimeMinutes: estimatedPrep ?? undefined,
+    cookTimeMinutes: estimatedCook ?? undefined,
+    totalTimeMinutes: estimatedTotal ?? undefined,
+    difficulty: undefined as string | undefined,   // Analyzer doesn't determine difficulty
+    percent_calories_protein: pctProtein,
+    percent_calories_fat: pctFat,
+    percent_calories_carbs: pctCarbs,
     ingredients: result.ingredients?.map((ing) => ({
       qty: ing.qty,
       unit: ing.unit,

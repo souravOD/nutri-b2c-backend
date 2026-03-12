@@ -48,6 +48,11 @@ export async function upsertProfileFromAppwrite(params: {
     (email ? email.split("@")[0] : null) ??
     "User";
 
+  // Derive firstName and lastName from fullName
+  const nameParts = fullName.trim().split(/\s+/);
+  const firstName = nameParts[0] || null;
+  const lastName = nameParts.length > 1 ? nameParts.slice(1).join(" ") : null;
+
   const existing = await getB2cCustomerByAppwriteId(params.appwriteId);
 
   if (existing?.id) {
@@ -55,6 +60,8 @@ export async function upsertProfileFromAppwrite(params: {
       .update(b2cCustomers)
       .set(pickDefined({
         fullName,
+        firstName,
+        lastName,
         email,
         phone: params.profile.phone ?? null,
         appwriteUserId: params.appwriteId,
@@ -73,6 +80,8 @@ export async function upsertProfileFromAppwrite(params: {
     await db.insert(b2cCustomers).values({
       email,
       fullName,
+      firstName,
+      lastName,
       phone: params.profile.phone ?? null,
       appwriteUserId: params.appwriteId,
       householdId: household.id,
@@ -93,11 +102,22 @@ export async function upsertHealthFromAppwrite(params: {
   }
 
   // Update demographic info on the customer record (Gold stores these on b2c_customers)
+  // Derive birth_month, birth_year, and age from dateOfBirth
+  const dob = params.health.dateOfBirth ? new Date(params.health.dateOfBirth) : null;
+  const birthMonth = dob && !isNaN(dob.getTime()) ? dob.getMonth() + 1 : undefined;
+  const birthYear = dob && !isNaN(dob.getTime()) ? dob.getFullYear() : undefined;
+  const age = dob && !isNaN(dob.getTime())
+    ? Math.floor((Date.now() - dob.getTime()) / (365.25 * 24 * 60 * 60 * 1000))
+    : undefined;
+
   await db
     .update(b2cCustomers)
     .set(pickDefined({
       dateOfBirth: params.health.dateOfBirth ?? undefined,
       gender: params.health.sex ?? undefined,
+      birthMonth,
+      birthYear,
+      age,
       updatedAt: new Date(),
     }))
     .where(eq(b2cCustomers.id, existing.id));

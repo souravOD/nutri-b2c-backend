@@ -1,4 +1,5 @@
 import { ragChat } from "./ragClient.js";
+import { getMemberPrefs, toRagProfile } from "./memberPrefs.js";
 import { db } from "../config/database.js";
 import { chatSessions } from "../../shared/goldSchema.js";
 import { eq, desc, and } from "drizzle-orm";
@@ -20,10 +21,19 @@ export interface ChatResponse {
 export async function processMessage(
     customerId: string,
     message: string,
-    sessionId?: string
+    sessionId?: string,
+    memberId?: string
 ): Promise<ChatResponse> {
-    // Try RAG chatbot
-    const ragResponse = await ragChat(message, customerId, sessionId ?? null);
+    // Resolve member profile for RAG personalization (household-aware)
+    let memberProfile: Record<string, unknown> | undefined;
+    const effectiveId = memberId || customerId;
+    if (memberId) {
+        const prefs = await getMemberPrefs(memberId);
+        memberProfile = toRagProfile(prefs);
+    }
+
+    // Try RAG chatbot — pass member context per-message
+    const ragResponse = await ragChat(message, customerId, sessionId ?? null, memberId, memberProfile);
 
     if (ragResponse) {
         // Update session in PG

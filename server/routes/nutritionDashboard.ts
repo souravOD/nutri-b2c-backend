@@ -7,6 +7,8 @@ import { requireB2cCustomerIdFromReq } from "../services/b2cIdentity.js";
 import {
   getHouseholdTimezone,
   getNutritionDashboardDaily,
+  getNutritionDashboardMonthly,
+  getNutritionDashboardRange,
   getNutritionDashboardWeekly,
   getNutritionHealthMetrics,
   getNutritionMemberSummary,
@@ -32,6 +34,17 @@ const memberSummaryQuerySchema = z.object({
 });
 
 const healthMetricsQuerySchema = z.object({
+  memberId: z.string().uuid().optional(),
+});
+
+const monthlyQuerySchema = z.object({
+  month: z.string().regex(/^\d{4}-\d{2}$/),
+  memberId: z.string().uuid().optional(),
+});
+
+const rangeQuerySchema = z.object({
+  startDate: z.string().regex(isoDateRegex),
+  endDate: z.string().regex(isoDateRegex),
   memberId: z.string().uuid().optional(),
 });
 
@@ -103,6 +116,45 @@ router.get(
         actorMemberId,
         memberId: parsed.memberId,
         weekStart,
+      });
+      res.json(data);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+router.get(
+  "/monthly",
+  rateLimitMiddleware,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const actorMemberId = b2cId(req);
+      const parsed = monthlyQuerySchema.parse(req.query ?? {});
+      const data = await getNutritionDashboardMonthly({
+        actorMemberId,
+        memberId: parsed.memberId,
+        month: parsed.month,
+      });
+      res.json(data);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+router.get(
+  "/range",
+  rateLimitMiddleware,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const actorMemberId = b2cId(req);
+      const parsed = rangeQuerySchema.parse(req.query ?? {});
+      const data = await getNutritionDashboardRange({
+        actorMemberId,
+        memberId: parsed.memberId,
+        startDate: parsed.startDate,
+        endDate: parsed.endDate,
       });
       res.json(data);
     } catch (err) {

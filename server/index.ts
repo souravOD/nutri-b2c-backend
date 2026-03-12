@@ -5,6 +5,7 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import app from "./app.js";
 import { queryClient, checkDatabaseHealth } from "./config/database.js";
+import { startNotificationCron } from "./scheduler.js";
 
 // prefer .env.local, fallback to .env (works on Windows too)
 const CWD = process.cwd();
@@ -42,6 +43,7 @@ const server = app.listen(PORT, HOST, () => {
   console.log(`[express] 🚀 Nutrition Backend running on http://${HOST}:${PORT}`);
   console.log(`[express] Environment: ${NODE_ENV}`);
   console.log(`[express] CORS origins: ${WEB_ORIGINS.join(", ")}`);
+  startNotificationCron();
 });
 
 // Prevent keep-alive race condition with reverse proxies (Next.js rewrite proxy).

@@ -1,6 +1,7 @@
 import { executeRaw } from "../config/database.js";
 import { getRecipeAllergenMap, getRecipeNutritionMap, hydrateRecipesByIds } from "./recipeHydration.js";
 import { ragFeed } from "./ragClient.js";
+import { getMemberPrefs, toRagProfile, type MemberPrefs } from "./memberPrefs.js";
 
 export interface FeedResult {
   recipe: any;
@@ -16,6 +17,24 @@ type UserPrefs = {
 };
 
 async function getUserPrefs(b2cCustomerId: string): Promise<UserPrefs> {
+  return getEffectivePrefs(b2cCustomerId);
+}
+
+/**
+ * Resolve effective preferences for a user or household member.
+ * When memberId is provided, uses that member's health profile instead.
+ */
+async function getEffectivePrefs(b2cCustomerId: string, memberId?: string): Promise<UserPrefs> {
+  if (memberId) {
+    const prefs = await getMemberPrefs(memberId);
+    return {
+      dietIds: prefs.dietIds,
+      allergenIds: prefs.allergenIds,
+      conditionIds: prefs.conditionIds,
+      dislikes: prefs.dislikes,
+    };
+  }
+
   const rows = await executeRaw(
     `
     select
@@ -78,10 +97,11 @@ function mapFeedRecipe(row: any, nutritionMap: Map<string, any>, allergenMap: Ma
 export async function getPersonalizedFeed(
   b2cCustomerId: string,
   limit: number = 200,
-  offset: number = 0
+  offset: number = 0,
+  memberId?: string
 ): Promise<FeedResult[]> {
   try {
-    const prefs = await getUserPrefs(b2cCustomerId);
+    const prefs = await getEffectivePrefs(b2cCustomerId, memberId);
     const dislikes = prefs.dislikes.map((d) => d.toLowerCase());
 
     const rows = await executeRaw(
@@ -252,17 +272,28 @@ async function getUserInteractionCount(userId: string): Promise<number> {
 export async function getPersonalizedFeedWithRAG(
   b2cCustomerId: string,
   limit: number = 200,
-  offset: number = 0
+  offset: number = 0,
+  memberId?: string
 ): Promise<FeedResult[]> {
   // PRD-17: skip RAG for zero-interaction users (collaborative filtering has no signal)
   const interactions = await getUserInteractionCount(b2cCustomerId);
   if (interactions === 0) {
-    return getPersonalizedFeed(b2cCustomerId, limit, offset);
+    return getPersonalizedFeed(b2cCustomerId, limit, offset, memberId);
+  }
+
+  // Resolve effective member prefs and RAG profile
+  const effectiveId = memberId || b2cCustomerId;
+  const prefs = await getEffectivePrefs(b2cCustomerId, memberId);
+
+  // Build RAG member_profile for personalization when memberId is provided
+  let memberProfile: Record<string, unknown> | undefined;
+  if (memberId) {
+    const memberFullPrefs = await getMemberPrefs(memberId);
+    memberProfile = toRagProfile(memberFullPrefs);
   }
 
   // Try graph-powered personalization first
-  const prefs = await getUserPrefs(b2cCustomerId);
-  const graphFeed = await ragFeed(b2cCustomerId, prefs);
+  const graphFeed = await ragFeed(b2cCustomerId, prefs, memberId, memberProfile);
 
   if (graphFeed && graphFeed.results.length > 0) {
     // Graph returned scored + explained results — hydrate from PG
@@ -280,7 +311,7 @@ export async function getPersonalizedFeedWithRAG(
 
       // Supplement with SQL results if RAG returned fewer than the limit
       if (ragResults.length < limit) {
-        const sqlResults = await getPersonalizedFeed(b2cCustomerId, limit - ragResults.length, 0);
+        const sqlResults = await getPersonalizedFeed(b2cCustomerId, limit - ragResults.length, 0, memberId);
         const ragIdSet = new Set(ragResults.map(r => r.recipe.id));
         const dedupedSql = sqlResults.filter(r => !ragIdSet.has(r.recipe.id));
         return [...ragResults, ...dedupedSql].slice(0, limit);
@@ -293,16 +324,19 @@ export async function getPersonalizedFeedWithRAG(
   }
 
   // SQL fallback — existing logic (popularity + recency)
-  return getPersonalizedFeed(b2cCustomerId, limit, offset);
+  return getPersonalizedFeed(b2cCustomerId, limit, offset, memberId);
 }
 
-export async function getFeedRecommendationsWithRAG(b2cCustomerId: string): Promise<{
+export async function getFeedRecommendationsWithRAG(b2cCustomerId: string, memberId?: string): Promise<{
   trending: any[];
   forYou: FeedResult[];
   recent: any[];
 }> {
   try {
-    // Trending: always SQL (not personalized)
+    // Option C: full per-member feed — apply member constraints to trending + recent too
+    const prefs = memberId ? await getEffectivePrefs(b2cCustomerId, memberId) : null;
+
+    // Trending: filter by member allergens/diets if member is selected
     const trendingRows = await executeRaw(
       `
       select
@@ -321,12 +355,20 @@ export async function getFeedRecommendationsWithRAG(b2cCustomerId: string): Prom
           and cpi.interaction_type = 'saved'
           and cpi.interaction_timestamp > now() - interval '7 days'
       ) p on true
+      where (coalesce(cardinality($1::uuid[]),0)=0 or not exists (
+        select 1
+        from gold.recipe_ingredients ri
+        join gold.ingredient_allergens ia on ia.ingredient_id = ri.ingredient_id
+        where ri.recipe_id = r.id
+          and ia.allergen_id = any($1)
+      ))
       order by saved_7d desc nulls last, r.updated_at desc
       limit 10
-      `
+      `,
+      [prefs?.allergenIds ?? []]
     );
 
-    // Recent: always SQL
+    // Recent: filter by member allergens if member is selected
     const recentRows = await executeRaw(
       `
       select
@@ -336,9 +378,17 @@ export async function getFeedRecommendationsWithRAG(b2cCustomerId: string): Prom
         c.name as cuisine_name
       from gold.recipes r
       left join gold.cuisines c on c.id = r.cuisine_id
+      where (coalesce(cardinality($1::uuid[]),0)=0 or not exists (
+        select 1
+        from gold.recipe_ingredients ri
+        join gold.ingredient_allergens ia on ia.ingredient_id = ri.ingredient_id
+        where ri.recipe_id = r.id
+          and ia.allergen_id = any($1)
+      ))
       order by r.updated_at desc nulls last
       limit 10
-      `
+      `,
+      [prefs?.allergenIds ?? []]
     );
 
     const ids = [...trendingRows, ...recentRows].map((r: any) => r.id);
@@ -348,8 +398,8 @@ export async function getFeedRecommendationsWithRAG(b2cCustomerId: string): Prom
     const trending = trendingRows.map((row: any) => mapFeedRecipe(row, nutritionMap, allergenMap));
     const recent = recentRows.map((row: any) => mapFeedRecipe(row, nutritionMap, allergenMap));
 
-    // ForYou: graph-enhanced (RAG → SQL fallback)
-    const forYou = await getPersonalizedFeedWithRAG(b2cCustomerId, 20);
+    // ForYou: graph-enhanced (RAG → SQL fallback) — uses member prefs
+    const forYou = await getPersonalizedFeedWithRAG(b2cCustomerId, 20, 0, memberId);
 
     return { trending, forYou, recent };
   } catch (error) {

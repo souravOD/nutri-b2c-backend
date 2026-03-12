@@ -434,6 +434,27 @@ export const productAllergens = gold.table("product_allergens", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
+// ── Certifications (maps existing gold.certifications) ──────────────────────
+export const certifications = gold.table("certifications", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  code: varchar("code", { length: 50 }).notNull(),
+  name: varchar("name", { length: 255 }).notNull(),
+  description: text("description"),
+  category: varchar("category", { length: 100 }),
+  region: varchar("region", { length: 50 }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const productCertifications = gold.table("product_certifications", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  productId: uuid("product_id").notNull(),
+  certificationId: uuid("certification_id").notNull(),
+  certificationDate: date("certification_date"),
+  expiryDate: date("expiry_date"),
+  certifyingBody: varchar("certifying_body", { length: 255 }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
 // ── Scan History ────────────────────────────────────────────────────────────
 export const scanHistory = gold.table("scan_history", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
@@ -679,6 +700,29 @@ export const householdBudgets = gold.table("household_budgets", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
+export const householdPreferences = gold.table("household_preferences", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  householdId: uuid("household_id").notNull(),
+  preferenceType: varchar("preference_type", { length: 50 }),
+  preferenceValue: varchar("preference_value", { length: 255 }),
+  priority: integer("priority"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const householdInvitations = gold.table("household_invitations", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  householdId: uuid("household_id").notNull(),
+  invitedBy: uuid("invited_by").notNull(),
+  inviteToken: text("invite_token").notNull().unique(),
+  invitedEmail: text("invited_email"),
+  role: varchar("role", { length: 20 }).default("secondary_adult"),
+  status: varchar("status", { length: 20 }).default("pending"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  acceptedAt: timestamp("accepted_at", { withTimezone: true }),
+  acceptedBy: uuid("accepted_by"),
+});
+
 // ── Chat Sessions (PRD-09 / PRD-16) ─────────────────────────────────────────
 
 export const chatSessions = gold.table("chat_sessions", {
@@ -787,5 +831,9 @@ export type RecipeRating = typeof recipeRatings.$inferSelect;
 export type ShoppingList = typeof shoppingLists.$inferSelect;
 export type ShoppingListItem = typeof shoppingListItems.$inferSelect;
 export type HouseholdBudget = typeof householdBudgets.$inferSelect;
+export type HouseholdPreference = typeof householdPreferences.$inferSelect;
+export type HouseholdInvitation = typeof householdInvitations.$inferSelect;
 export type ChatSession = typeof chatSessions.$inferSelect;
 export type B2cCustomerSettings = typeof b2cCustomerSettings.$inferSelect;
+export type Certification = typeof certifications.$inferSelect;
+export type ProductCertification = typeof productCertifications.$inferSelect;
