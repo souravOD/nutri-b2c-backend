@@ -61,6 +61,7 @@ const corsOptions: cors.CorsOptions = {
     "authorization",
     "idempotency-key",
     "if-none-match",
+    "x-timezone",
   ],
   credentials: true,
   maxAge: 86400,
