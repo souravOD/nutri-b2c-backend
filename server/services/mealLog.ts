@@ -13,6 +13,7 @@ import {
 } from "../../shared/goldSchema.js";
 import { resolveMemberScope } from "./memberScope.js";
 import { ragMealPatterns } from "./ragClient.js";
+import { getOrCreateHousehold } from "./household.js";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -859,9 +860,14 @@ export async function getMealPatterns(
   memberId?: string
 ) {
   const scope = await resolveMemberScope(actorB2cCustomerId, memberId);
+  const household = await getOrCreateHousehold(actorB2cCustomerId);
 
   // Try graph-based pattern analysis
-  const graphPatterns = await ragMealPatterns(scope.targetMemberId, days);
+  const graphPatterns = await ragMealPatterns(
+      scope.targetMemberId, days,
+      household.householdType ?? undefined,
+      household.totalMembers ?? undefined
+  );
   if (graphPatterns) return graphPatterns;
 
   // SQL fallback: basic stats from meal log history

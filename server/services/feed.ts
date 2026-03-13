@@ -1,6 +1,7 @@
 import { executeRaw } from "../config/database.js";
 import { getRecipeAllergenMap, getRecipeNutritionMap, hydrateRecipesByIds } from "./recipeHydration.js";
-import { ragFeed } from "./ragClient.js";
+import { ragFeed, toRagScope } from "./ragClient.js";
+import { getOrCreateHousehold } from "./household.js";
 import { getMemberPrefs, toRagProfile, type MemberPrefs } from "./memberPrefs.js";
 
 export interface FeedResult {
@@ -292,8 +293,17 @@ export async function getPersonalizedFeedWithRAG(
     memberProfile = toRagProfile(memberFullPrefs);
   }
 
+  // Resolve household context for RAG personalization
+  const household = await getOrCreateHousehold(b2cCustomerId);
+
   // Try graph-powered personalization first
-  const graphFeed = await ragFeed(b2cCustomerId, prefs, memberId, memberProfile);
+  const graphFeed = await ragFeed(
+      b2cCustomerId, prefs, memberId, memberProfile,
+      household.householdType ?? undefined,
+      household.totalMembers ?? undefined,
+      household.id,
+      toRagScope(household.householdType)
+  );
 
   if (graphFeed && graphFeed.results.length > 0) {
     // Graph returned scored + explained results — hydrate from PG

@@ -308,9 +308,16 @@ async function matchProductsWithRAG(
   ingredientIds: string[],
   allergenIds: string[],
   certificationCategories?: string[],
-  preferredBrands?: string[]
+  preferredBrands?: string[],
+  householdType?: string,
+  totalMembers?: number,
+  householdBudget?: { amount: number; period: string; currency: string } | null,
+  ingredientNames?: Record<string, string>
 ): Promise<Map<string, ProductCandidate> | null> {
-  const result = await ragProducts(ingredientIds, allergenIds, certificationCategories, preferredBrands);
+  const result = await ragProducts(
+      ingredientIds, allergenIds, certificationCategories, preferredBrands,
+      householdType, totalMembers, householdBudget, ingredientNames
+  );
   if (!result || !result.products?.length) return null;
 
   const map = new Map<string, ProductCandidate>();
@@ -483,8 +490,30 @@ export async function generateGroceryList(
 
   // PRD-13: Try graph-aware allergen-safe product matching
   const allergenIds = await getHouseholdAllergenIds(household.id);
+
+  // Fetch active grocery budget for RAG budget-aware ranking
+  const budgetRows = (await executeRaw(
+    `SELECT amount, period, currency FROM gold.household_budgets
+     WHERE household_id = $1 AND budget_type = 'grocery' AND is_active = true
+     ORDER BY created_at DESC LIMIT 1`,
+    [household.id]
+  )) as any[];
+  const activeBudget = budgetRows.length > 0
+    ? { amount: Number(budgetRows[0].amount), period: budgetRows[0].period as string, currency: (budgetRows[0].currency ?? "USD") as string }
+    : null;
+
+  // Build ingredient name map for RAG name-based fallback matching
+  const ingredientNameMap: Record<string, string> = {};
+  for (const bucket of bucketValues) {
+    ingredientNameMap[bucket.ingredientId] = bucket.itemName;
+  }
+
   const graphProductMap = await matchProductsWithRAG(
-    ingredientIds, allergenIds, certCategories, preferredBrandNames
+    ingredientIds, allergenIds, certCategories, preferredBrandNames,
+    household.householdType ?? undefined,
+    household.totalMembers ?? undefined,
+    activeBudget,
+    ingredientNameMap
   );
 
   let pricedItems = 0;

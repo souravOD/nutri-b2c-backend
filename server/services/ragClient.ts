@@ -272,6 +272,19 @@ export interface RagChatResult {
     }>;
 }
 
+// ── Helpers ──────────────────────────────────────────────
+
+/** Map B2C householdType to RAG scope parameter */
+export function toRagScope(householdType?: string | null): string | undefined {
+    if (!householdType) return undefined;
+    const map: Record<string, string> = {
+        individual: "individual",
+        family: "family",
+        couple: "couple",
+    };
+    return map[householdType.toLowerCase()] ?? undefined;
+}
+
 // ── Feature Functions ────────────────────────────────────
 
 export async function ragSearch(params: {
@@ -280,6 +293,8 @@ export async function ragSearch(params: {
     customer_id?: string;
     member_id?: string;
     member_profile?: Record<string, unknown>;
+    household_id?: string;
+    scope?: string;
 }): Promise<RagSearchResult | null> {
     return callRag<RagSearchResult>("search", params);
 }
@@ -293,13 +308,23 @@ export async function ragFeed(
         dislikes?: string[];
     },
     memberId?: string,
-    memberProfile?: Record<string, unknown>
+    memberProfile?: Record<string, unknown>,
+    householdType?: string,
+    totalMembers?: number,
+    householdId?: string,
+    scope?: string,
+    mealType?: string
 ): Promise<RagFeedResult | null> {
     return callRag<RagFeedResult>("feed", {
         customer_id: customerId,
         preferences,
         ...(memberId ? { member_id: memberId } : {}),
         ...(memberProfile ? { member_profile: memberProfile } : {}),
+        ...(householdType ? { household_type: householdType } : {}),
+        ...(totalMembers ? { total_members: totalMembers } : {}),
+        ...(householdId ? { household_id: householdId } : {}),
+        ...(scope ? { scope } : {}),
+        ...(mealType ? { meal_type: mealType } : {}),
     });
 }
 
@@ -315,6 +340,13 @@ export async function ragMealCandidates(params: {
     date_range: { start: string; end: string };
     meals_per_day: string[];
     limit?: number;
+    household_type?: string;
+    total_members?: number;
+    household_id?: string;
+    scope?: string;
+    member_profile?: Record<string, unknown>;
+    meal_type?: string;
+    exclude_ids?: string[];
 }): Promise<RagMealCandidatesResult | null> {
     return callRag<RagMealCandidatesResult>("mealPlan", params);
 }
@@ -323,13 +355,21 @@ export async function ragProducts(
     ingredientIds: string[],
     customerAllergens: string[],
     certificationCategories?: string[],
-    preferredBrands?: string[]
+    preferredBrands?: string[],
+    householdType?: string,
+    totalMembers?: number,
+    householdBudget?: { amount: number; period: string; currency: string } | null,
+    ingredientNames?: Record<string, string>
 ): Promise<RagProductsResult | null> {
     return callRag<RagProductsResult>("grocery", {
         ingredient_ids: ingredientIds,
         customer_allergens: customerAllergens,
         quality_preferences: certificationCategories ?? [],
         preferred_brands: preferredBrands ?? [],
+        ...(householdType ? { household_type: householdType } : {}),
+        ...(totalMembers ? { total_members: totalMembers } : {}),
+        ...(householdBudget ? { household_budget: householdBudget.amount } : {}),
+        ...(ingredientNames ? { ingredient_names: ingredientNames } : {}),
     });
 }
 
@@ -345,11 +385,15 @@ export async function ragAlternatives(
 
 export async function ragMealPatterns(
     customerId: string,
-    days: number = 14
+    days: number = 14,
+    householdType?: string,
+    totalMembers?: number
 ): Promise<RagMealPatternsResult | null> {
     return callRag<RagMealPatternsResult>("mealLog", {
         customer_id: customerId,
         days,
+        ...(householdType ? { household_type: householdType } : {}),
+        ...(totalMembers ? { total_members: totalMembers } : {}),
     });
 }
 
@@ -358,7 +402,11 @@ export async function ragChat(
     customerId: string,
     sessionId?: string | null,
     memberId?: string,
-    memberProfile?: Record<string, unknown>
+    memberProfile?: Record<string, unknown>,
+    householdType?: string,
+    totalMembers?: number,
+    householdId?: string,
+    displayName?: string
 ): Promise<RagChatResult | null> {
     return callRag<RagChatResult>("chatbot", {
         message,
@@ -366,6 +414,10 @@ export async function ragChat(
         session_id: sessionId ?? null,
         ...(memberId ? { member_id: memberId } : {}),
         ...(memberProfile ? { member_profile: memberProfile } : {}),
+        ...(householdType ? { household_type: householdType } : {}),
+        ...(totalMembers ? { total_members: totalMembers } : {}),
+        ...(householdId ? { household_id: householdId } : {}),
+        ...(displayName ? { display_name: displayName } : {}),
     });
 }
 
@@ -392,6 +444,26 @@ export async function ragIngredientSubstitutions(
         ingredient_id: ingredientId,
         customer_allergens: customerAllergens,
     });
+}
+
+// ── Notifications ────────────────────────────────────────
+
+export interface RagNotificationResult {
+    title: string;
+    body: string;
+    action_url: string;
+    icon: string;
+    type: string;
+}
+
+export async function ragNotifications(params: {
+    customer_id: string;
+    trigger_type: string;
+    meal_log_summary?: Record<string, unknown>;
+    health_profile?: Record<string, unknown>;
+    timezone?: string;
+}): Promise<RagNotificationResult | null> {
+    return callRag<RagNotificationResult>("notification", params);
 }
 
 // ── Admin Diagnostics ────────────────────────────────────
