@@ -14,6 +14,8 @@ import mealPlanRouter from "./routes/mealPlan.js";
 import groceryListRouter from "./routes/groceryList.js";
 import budgetRouter from "./routes/budget.js";
 import nutritionDashboardRouter from "./routes/nutritionDashboard.js";
+import householdInviteRouter, { invitationTokenRouter } from "./routes/householdInvite.js";
+import householdPreferenceRouter from "./routes/householdPreference.js";
 import { errorHandler, notFoundHandler } from "./middleware/errorHandler.js";
 import { idempotencyMiddleware, storeIdempotentResponse } from "./middleware/idempotency.js";
 import userRecipesRouter from "./routes/userRecipes.js";
@@ -23,6 +25,7 @@ import notificationRouter from "./routes/notifications.js";
 import ingredientSearchRouter from "./routes/ingredientSearch.js";
 import uploadsRouter from "./routes/uploads.js";
 import recipeMetaRouter from "./routes/recipeMeta.js";
+import groceryPreferencesRouter from "./routes/groceryPreferences.js";
 
 export function registerRoutes(app: Express): void {
   // Global middleware
@@ -41,8 +44,12 @@ export function registerRoutes(app: Express): void {
   app.use("/api/v1/analyzer", analyzerRouter);
   app.use("/api/v1/meal-log", mealLogRouter);
   app.use("/api/v1/households", householdRouter);
+  app.use("/api/v1/households/invitations", householdInviteRouter);
+  app.use("/api/v1/households/preferences", householdPreferenceRouter);
+  app.use("/api/v1/invitations", invitationTokenRouter);
   app.use("/api/v1/meal-plans", mealPlanRouter);
   app.use("/api/v1/grocery-lists", groceryListRouter);
+  app.use("/api/v1/grocery-preferences", groceryPreferencesRouter);
   app.use("/api/v1/budget", budgetRouter);
   app.use("/api/v1/nutrition-dashboard", nutritionDashboardRouter);
   app.use("/api/v1/chat", chatRouter);

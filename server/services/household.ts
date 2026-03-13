@@ -7,6 +7,7 @@ import {
   b2cCustomerAllergens,
   b2cCustomerDietaryPreferences,
   b2cCustomerHealthConditions,
+  b2cCustomerCuisinePreferences,
   allergens,
   dietaryPreferences,
   healthConditions,
@@ -15,6 +16,11 @@ import {
 // ── Types ───────────────────────────────────────────────────────────────────
 
 export interface MemberHealthProfile {
+  heightCm: string | null;
+  weightKg: string | null;
+  activityLevel: string | null;
+  healthGoal: string | null;
+  targetWeightKg: string | null;
   targetCalories: number | null;
   targetProteinG: string | null;
   targetCarbsG: string | null;
@@ -22,6 +28,8 @@ export interface MemberHealthProfile {
   targetFiberG: string | null;
   targetSodiumMg: number | null;
   targetSugarG: string | null;
+  intolerances: string[];
+  dislikedIngredients: string[];
   allergens: { id: string; code: string; name: string; severity: string | null }[];
   diets: { id: string; code: string; name: string; strictness: string | null }[];
   conditions: { id: string; code: string; name: string; severity: string | null }[];
@@ -31,6 +39,7 @@ export interface HouseholdMember {
   id: string;
   fullName: string;
   firstName: string | null;
+  dateOfBirth: string | null;
   age: number | null;
   gender: string | null;
   householdRole: string | null;
@@ -41,6 +50,8 @@ export interface HouseholdMember {
 export interface AddMemberInput {
   fullName: string;
   firstName?: string;
+  email?: string | null;
+  dateOfBirth?: string | null;
   age?: number;
   gender?: string;
   householdRole?: string;
@@ -54,9 +65,12 @@ export interface UpdateMemberHealthInput {
   targetFiberG?: number;
   targetSodiumMg?: number;
   targetSugarG?: number;
+  healthGoal?: string | null;
+  dislikedIngredients?: string[];
   allergenIds?: string[];
   dietIds?: string[];
   conditionIds?: string[];
+  cuisineIds?: string[];
 }
 
 // ── Get or Create Household ─────────────────────────────────────────────────
@@ -121,6 +135,7 @@ export async function getHouseholdMembers(householdId: string): Promise<Househol
     id: m.id,
     fullName: m.fullName,
     firstName: m.firstName,
+    dateOfBirth: m.dateOfBirth,
     age: m.age,
     gender: m.gender,
     householdRole: m.householdRole,
@@ -197,6 +212,11 @@ export async function getMemberHealthProfiles(
   for (const id of memberIds) {
     const hp = healthRows.find((r) => r.b2cCustomerId === id);
     result.set(id, {
+      heightCm: hp?.heightCm ?? null,
+      weightKg: hp?.weightKg ?? null,
+      activityLevel: hp?.activityLevel ?? null,
+      healthGoal: hp?.healthGoal ?? null,
+      targetWeightKg: hp?.targetWeightKg ?? null,
       targetCalories: hp?.targetCalories ?? null,
       targetProteinG: hp?.targetProteinG ?? null,
       targetCarbsG: hp?.targetCarbsG ?? null,
@@ -204,6 +224,8 @@ export async function getMemberHealthProfiles(
       targetFiberG: hp?.targetFiberG ?? null,
       targetSodiumMg: hp?.targetSodiumMg ?? null,
       targetSugarG: hp?.targetSugarG ?? null,
+      intolerances: hp?.intolerances ?? [],
+      dislikedIngredients: hp?.dislikedIngredients ?? [],
       allergens: allergenRows
         .filter((r) => r.b2cCustomerId === id)
         .map((r) => ({ id: r.allergenId, code: r.code, name: r.name, severity: r.severity })),
@@ -225,13 +247,43 @@ export async function addFamilyMember(
   householdId: string,
   input: AddMemberInput
 ) {
+  // Derive firstName, lastName from fullName
+  const nameParts = input.fullName.trim().split(/\s+/);
+  const derivedFirstName = input.firstName ?? nameParts[0];
+  const derivedLastName = nameParts.length > 1 ? nameParts.slice(1).join(" ") : null;
+
+  // Derive age, birthMonth, birthYear from dateOfBirth
+  let derivedAge: number | null = input.age ?? null;
+  let derivedBirthMonth: number | null = null;
+  let derivedBirthYear: number | null = null;
+
+  if (input.dateOfBirth) {
+    const dob = new Date(input.dateOfBirth);
+    if (!isNaN(dob.getTime())) {
+      derivedBirthMonth = dob.getMonth() + 1;         // 1-12
+      derivedBirthYear = dob.getFullYear();
+      const today = new Date();
+      let age = today.getFullYear() - dob.getFullYear();
+      const monthDiff = today.getMonth() - dob.getMonth();
+      if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < dob.getDate())) {
+        age--;
+      }
+      derivedAge = age;
+    }
+  }
+
   const inserted = await db
     .insert(b2cCustomers)
     .values({
       householdId,
       fullName: input.fullName,
-      firstName: input.firstName ?? input.fullName.split(" ")[0],
-      age: input.age ?? null,
+      firstName: derivedFirstName,
+      lastName: derivedLastName,
+      email: input.email ?? null,
+      dateOfBirth: input.dateOfBirth ?? null,
+      birthMonth: derivedBirthMonth,
+      birthYear: derivedBirthYear,
+      age: derivedAge,
       gender: input.gender ?? null,
       householdRole: input.householdRole ?? "dependent",
       isProfileOwner: false,
@@ -246,15 +298,22 @@ export async function addFamilyMember(
     onboardingComplete: false,
   });
 
+  // Recount members and auto-upgrade household_type
+  const memberCount = (
+    await db
+      .select()
+      .from(b2cCustomers)
+      .where(eq(b2cCustomers.householdId, householdId))
+  ).length;
+
+  const householdType =
+    memberCount === 1 ? "individual" : memberCount === 2 ? "couple" : "family";
+
   await db
     .update(households)
     .set({
-      totalMembers: (
-        await db
-          .select()
-          .from(b2cCustomers)
-          .where(eq(b2cCustomers.householdId, householdId))
-      ).length,
+      totalMembers: memberCount,
+      householdType,
     })
     .where(eq(households.id, householdId));
 
@@ -278,6 +337,7 @@ export async function getMemberDetail(memberId: string): Promise<HouseholdMember
     id: rows[0].id,
     fullName: rows[0].fullName,
     firstName: rows[0].firstName,
+    dateOfBirth: rows[0].dateOfBirth,
     age: rows[0].age,
     gender: rows[0].gender,
     householdRole: rows[0].householdRole,
@@ -330,6 +390,8 @@ export async function updateMemberHealthProfile(
   if (input.targetFiberG !== undefined) healthValues.targetFiberG = String(input.targetFiberG);
   if (input.targetSodiumMg !== undefined) healthValues.targetSodiumMg = input.targetSodiumMg;
   if (input.targetSugarG !== undefined) healthValues.targetSugarG = String(input.targetSugarG);
+  if (input.healthGoal !== undefined) healthValues.healthGoal = input.healthGoal;
+  if (input.dislikedIngredients !== undefined) healthValues.dislikedIngredients = input.dislikedIngredients;
 
   if (existing[0] && Object.keys(healthValues).length > 0) {
     await db
@@ -388,6 +450,21 @@ export async function updateMemberHealthProfile(
     }
   }
 
+  // ── Cuisine Preferences (delete + re-insert) ──
+  if (input.cuisineIds) {
+    await db
+      .delete(b2cCustomerCuisinePreferences)
+      .where(eq(b2cCustomerCuisinePreferences.b2cCustomerId, memberId));
+    if (input.cuisineIds.length > 0) {
+      await db.insert(b2cCustomerCuisinePreferences).values(
+        input.cuisineIds.map((cuisineId) => ({
+          b2cCustomerId: memberId,
+          cuisineId,
+        }))
+      );
+    }
+  }
+
   return getMemberDetail(memberId);
 }
 
@@ -436,14 +513,18 @@ export async function deleteFamilyMember(
   // 3. Delete the member record
   await db.delete(b2cCustomers).where(eq(b2cCustomers.id, memberId));
 
-  // 4. Update household total_members count
+  // 4. Recount and auto-downgrade household_type
   const remainingMembers = await db
     .select()
     .from(b2cCustomers)
     .where(eq(b2cCustomers.householdId, householdId));
 
+  const memberCount = remainingMembers.length;
+  const householdType =
+    memberCount === 1 ? "individual" : memberCount === 2 ? "couple" : "family";
+
   await db
     .update(households)
-    .set({ totalMembers: remainingMembers.length })
+    .set({ totalMembers: memberCount, householdType })
     .where(eq(households.id, householdId));
 }

@@ -9,6 +9,7 @@ import {
 } from "./b2cTaxonomy.js";
 import { getRecipeAllergenMap, getRecipeNutritionMap, getRecipeIngredients, hydrateRecipesByIds } from "./recipeHydration.js";
 import { ragSearch } from "./ragClient.js";
+import { getMemberPrefs, toRagProfile } from "./memberPrefs.js";
 
 export interface SearchParams {
   q?: string;
@@ -294,8 +295,25 @@ export async function getPopularRecipes(limit: number = 20): Promise<any[]> {
 
 export async function searchRecipesWithRAG(
   params: SearchParams,
-  b2cCustomerId?: string
+  b2cCustomerId?: string,
+  memberId?: string
 ): Promise<SearchResult[]> {
+  // Household: auto-apply member's allergens/diets as search constraints
+  let memberProfile: Record<string, unknown> | undefined;
+  if (memberId) {
+    const prefs = await getMemberPrefs(memberId);
+    memberProfile = toRagProfile(prefs);
+    // Safety-critical: merge member's allergens into search exclusions
+    params.allergensExclude = [
+      ...(params.allergensExclude || []),
+      ...prefs.allergenIds,
+    ];
+    // Merge member's diets into search filters
+    if (prefs.dietIds.length > 0) {
+      params.diets = [...(params.diets || []), ...prefs.dietIds];
+    }
+  }
+
   // Strategy:
   // - NL query (params.q) → try RAG first for semantic+structural search
   // - Filter-only (no free text) → always SQL (faster for indexed columns)
@@ -312,18 +330,31 @@ export async function searchRecipesWithRAG(
         calMax: params.calMax,
         timeMax: params.timeMax,
       },
-      customer_id: b2cCustomerId,
+      customer_id: memberId || b2cCustomerId,
+      member_id: memberId,
+      member_profile: memberProfile,
     });
 
     if (ragResult && ragResult.results.length > 0) {
-      // RAG returned results — hydrate with full recipe data from PG
+      // Validate IDs are real UUIDs before hydrating
+      const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
       const ids = ragResult.results.map(r => r.id);
-      const hydrated = await hydrateRecipesByIds(ids);
-      return hydrated.map((recipe, i) => ({
-        recipe,
-        score: ragResult.results[i]?.score ?? 0,
-        reasons: ragResult.results[i]?.reasons ?? [],
-      }));
+      const allValid = ids.every(id => UUID_RE.test(id));
+
+      if (allValid) {
+        try {
+          const hydrated = await hydrateRecipesByIds(ids);
+          return hydrated.map((recipe, i) => ({
+            recipe,
+            score: ragResult.results[i]?.score ?? 0,
+            reasons: ragResult.results[i]?.reasons ?? [],
+          }));
+        } catch (err) {
+          console.warn("[RAG] Search hydration failed, falling back to SQL:", err);
+        }
+      } else {
+        console.warn("[RAG] Search results have non-UUID IDs, falling back to SQL");
+      }
     }
     // ragResult is null or empty → fall through to SQL
   }

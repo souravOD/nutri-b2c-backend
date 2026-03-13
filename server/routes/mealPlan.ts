@@ -14,6 +14,9 @@ import {
   regeneratePlan,
   deletePlan,
   logMealFromPlan,
+  addItemToPlan,
+  reorderItems,
+  deleteItemFromPlan,
 } from "../services/mealPlan.js";
 
 const router = Router();
@@ -54,6 +57,24 @@ const logMealSchema = z.object({
   itemId: z.string().uuid(),
 });
 
+const addItemSchema = z.object({
+  recipeId: z.string().uuid(),
+  mealDate: z.string().regex(dateRegex, "mealDate must be YYYY-MM-DD"),
+  mealType: mealTypeEnum,
+  servings: z.number().int().positive().optional(),
+  replaceItemId: z.string().uuid().optional(),
+});
+
+const reorderSchema = z.object({
+  moves: z.array(
+    z.object({
+      itemId: z.string().uuid(),
+      mealDate: z.string().regex(dateRegex, "mealDate must be YYYY-MM-DD"),
+      mealType: mealTypeEnum,
+    })
+  ).min(1),
+});
+
 // ── Routes ──────────────────────────────────────────────────────────────────
 
 // POST /api/v1/meal-plans/generate
@@ -82,7 +103,8 @@ router.get(
       const status = typeof req.query.status === "string" ? req.query.status : undefined;
       const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 20;
       const offset = req.query.offset ? parseInt(req.query.offset as string, 10) : 0;
-      const result = await listPlans(customerId, status, limit, offset);
+      const memberId = typeof req.query.memberId === "string" ? req.query.memberId : undefined;
+      const result = await listPlans(customerId, status, limit, offset, memberId);
       res.json(result);
     } catch (err) {
       next(err);
@@ -128,6 +150,51 @@ router.post(
       const customerId = b2cId(req);
       const parsed = swapSchema.parse(req.body);
       const result = await swapMeal(req.params.id, parsed.itemId, customerId, parsed.reason);
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// POST /api/v1/meal-plans/:id/add-item
+router.post(
+  "/:id/add-item",
+  rateLimitMiddleware,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const customerId = b2cId(req);
+      const parsed = addItemSchema.parse(req.body);
+      const result = await addItemToPlan(req.params.id, customerId, parsed);
+      res.status(201).json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// PATCH /api/v1/meal-plans/:id/reorder
+router.patch(
+  "/:id/reorder",
+  rateLimitMiddleware,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const parsed = reorderSchema.parse(req.body);
+      const result = await reorderItems(req.params.id, parsed.moves);
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// DELETE /api/v1/meal-plans/:id/items/:itemId
+router.delete(
+  "/:id/items/:itemId",
+  rateLimitMiddleware,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const result = await deleteItemFromPlan(req.params.id, req.params.itemId);
       res.json(result);
     } catch (err) {
       next(err);

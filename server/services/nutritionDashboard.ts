@@ -271,10 +271,10 @@ function buildTargets(
     const def = defs[cfg.key];
     const rdv = def.recommendedDailyValue
       ? convertUnit(
-          def.recommendedDailyValue,
-          def.rdvUnit || def.unitName || cfg.defaultUnit,
-          cfg.defaultUnit
-        )
+        def.recommendedDailyValue,
+        def.rdvUnit || def.unitName || cfg.defaultUnit,
+        cfg.defaultUnit
+      )
       : 0;
     const value = profileValue > 0 ? profileValue : rdv > 0 ? rdv : cfg.defaultTarget;
     targets[cfg.key] = { value: round2(value), unit: cfg.defaultUnit };
@@ -327,19 +327,19 @@ async function ensureRecentNutrientSnapshots(
 
   const recipeProfiles = recipeIds.length
     ? ((await executeRaw(
-        `SELECT *
+      `SELECT *
          FROM gold.recipe_nutrition_profiles
          WHERE recipe_id = ANY($1::uuid[])`,
-        [recipeIds]
-      )) as any[])
+      [recipeIds]
+    )) as any[])
     : [];
   const productProfiles = productIds.length
     ? ((await executeRaw(
-        `SELECT *
+      `SELECT *
          FROM gold.products
          WHERE id = ANY($1::uuid[])`,
-        [productIds]
-      )) as any[])
+      [productIds]
+    )) as any[])
     : [];
 
   const recipeMap = new Map<string, any>(recipeProfiles.map((r: any) => [r.recipeId ?? r.recipe_id, r]));
@@ -348,7 +348,7 @@ async function ensureRecentNutrientSnapshots(
   const factRows =
     recipeIds.length || productIds.length
       ? ((await executeRaw(
-          `SELECT
+        `SELECT
              entity_type,
              entity_id,
              nutrient_id,
@@ -363,8 +363,8 @@ async function ensureRecentNutrientSnapshots(
                OR
                (entity_type = 'product' AND entity_id = ANY($3::uuid[]))
              )`,
-          [nutrientIds, recipeIds.length ? recipeIds : ["00000000-0000-0000-0000-000000000000"], productIds.length ? productIds : ["00000000-0000-0000-0000-000000000000"]]
-        )) as any[])
+        [nutrientIds, recipeIds.length ? recipeIds : ["00000000-0000-0000-0000-000000000000"], productIds.length ? productIds : ["00000000-0000-0000-0000-000000000000"]]
+      )) as any[])
       : [];
 
   const factMap = new Map<string, any>();
@@ -657,15 +657,38 @@ export async function getNutritionDashboardDaily(input: {
   };
 }
 
-export async function getNutritionDashboardWeekly(input: {
+/** Count days between two YYYY-MM-DD strings (inclusive). */
+function daysBetween(start: string, end: string): number {
+  const ms = new Date(`${end}T00:00:00.000Z`).getTime() - new Date(`${start}T00:00:00.000Z`).getTime();
+  return Math.round(ms / 86_400_000) + 1;
+}
+
+/**
+ * Generic range-based nutrition dashboard.
+ * Supports any date range up to 180 days (≈ 6 months).
+ * Weekly, monthly, and custom views all delegate to this function.
+ */
+export async function getNutritionDashboardRange(input: {
   actorMemberId: string;
-  weekStart: string;
+  startDate: string;
+  endDate: string;
   memberId?: string;
 }) {
+  const totalDays = daysBetween(input.startDate, input.endDate);
+  if (totalDays > 180) {
+    const err = new Error("Date range exceeds 180 days (≈ 6 months)");
+    (err as any).status = 400;
+    throw err;
+  }
+  if (totalDays < 1) {
+    const err = new Error("Invalid date range: startDate must be before endDate");
+    (err as any).status = 400;
+    throw err;
+  }
+
   const scope = await resolveMemberScope(input.actorMemberId, input.memberId);
   const defs = await loadCuratedDefinitions();
-  const weekEnd = addDays(input.weekStart, 6);
-  await ensureRecentNutrientSnapshots(scope.targetMemberId, input.weekStart, weekEnd, defs);
+  await ensureRecentNutrientSnapshots(scope.targetMemberId, input.startDate, input.endDate, defs);
 
   const [profile, rows, nutrientTotals] = await Promise.all([
     getMemberProfile(scope.targetMemberId),
@@ -683,9 +706,9 @@ export async function getNutritionDashboardWeekly(input: {
        WHERE b2c_customer_id = $1
          AND log_date BETWEEN $2 AND $3
        ORDER BY log_date`,
-      [scope.targetMemberId, input.weekStart, weekEnd]
+      [scope.targetMemberId, input.startDate, input.endDate]
     ) as Promise<any[]>,
-    getNutrientTotalsByKey(scope.targetMemberId, input.weekStart, weekEnd, defs),
+    getNutrientTotalsByKey(scope.targetMemberId, input.startDate, input.endDate, defs),
   ]);
 
   const byDate = new Map<string, any>();
@@ -701,8 +724,8 @@ export async function getNutritionDashboardWeekly(input: {
     sugarG: number;
     sodiumMg: number;
   }> = [];
-  for (let i = 0; i < 7; i += 1) {
-    const date = addDays(input.weekStart, i);
+  for (let i = 0; i < totalDays; i += 1) {
+    const date = addDays(input.startDate, i);
     const row = byDate.get(date);
     days.push({
       date,
@@ -732,17 +755,17 @@ export async function getNutritionDashboardWeekly(input: {
 
   const targets = buildTargets(profile, defs);
   const avgIntake: Record<CuratedNutrientKey, number> = {
-    calories: round2(totals.calories / 7),
-    protein: round2(totals.proteinG / 7),
-    carbs: round2(totals.carbsG / 7),
-    fat: round2(totals.fatG / 7),
-    fiber: round2(totals.fiberG / 7),
-    sugar: round2(totals.sugarG / 7),
-    sodium: round2(totals.sodiumMg / 7),
-    vitamin_d: round2((nutrientTotals.vitamin_d || 0) / 7),
-    calcium: round2((nutrientTotals.calcium || 0) / 7),
-    iron: round2((nutrientTotals.iron || 0) / 7),
-    potassium: round2((nutrientTotals.potassium || 0) / 7),
+    calories: round2(totals.calories / totalDays),
+    protein: round2(totals.proteinG / totalDays),
+    carbs: round2(totals.carbsG / totalDays),
+    fat: round2(totals.fatG / totalDays),
+    fiber: round2(totals.fiberG / totalDays),
+    sugar: round2(totals.sugarG / totalDays),
+    sodium: round2(totals.sodiumMg / totalDays),
+    vitamin_d: round2((nutrientTotals.vitamin_d || 0) / totalDays),
+    calcium: round2((nutrientTotals.calcium || 0) / totalDays),
+    iron: round2((nutrientTotals.iron || 0) / totalDays),
+    potassium: round2((nutrientTotals.potassium || 0) / totalDays),
   };
 
   const nutrientGaps = calculateNutrientGaps(
@@ -763,17 +786,18 @@ export async function getNutritionDashboardWeekly(input: {
   const loggedDays = days.filter((d) => d.calories > 0).length;
 
   return {
-    weekStart: input.weekStart,
-    weekEnd,
+    startDate: input.startDate,
+    endDate: input.endDate,
+    totalDays,
     days,
     averages: {
-      calories: round2(totals.calories / 7),
-      proteinG: round2(totals.proteinG / 7),
-      carbsG: round2(totals.carbsG / 7),
-      fatG: round2(totals.fatG / 7),
-      fiberG: round2(totals.fiberG / 7),
-      sugarG: round2(totals.sugarG / 7),
-      sodiumMg: round2(totals.sodiumMg / 7),
+      calories: round2(totals.calories / totalDays),
+      proteinG: round2(totals.proteinG / totalDays),
+      carbsG: round2(totals.carbsG / totalDays),
+      fatG: round2(totals.fatG / totalDays),
+      fiberG: round2(totals.fiberG / totalDays),
+      sugarG: round2(totals.sugarG / totalDays),
+      sodiumMg: round2(totals.sodiumMg / totalDays),
       vitaminDMcg: avgIntake.vitamin_d,
       calciumMg: avgIntake.calcium,
       ironMg: avgIntake.iron,
@@ -782,9 +806,62 @@ export async function getNutritionDashboardWeekly(input: {
     compliance: {
       loggedDays,
       calorieGoalDays: compliantDays,
-      calorieGoalPct: round2((compliantDays / 7) * 100),
+      calorieGoalPct: round2((compliantDays / totalDays) * 100),
     },
     nutrientGaps,
+  };
+}
+
+/**
+ * Monthly convenience wrapper.
+ * Accepts "YYYY-MM", resolves to first/last day of that month.
+ */
+export async function getNutritionDashboardMonthly(input: {
+  actorMemberId: string;
+  month: string; // YYYY-MM
+  memberId?: string;
+}) {
+  const [yearStr, monthStr] = input.month.split("-");
+  const year = Number.parseInt(yearStr, 10);
+  const month = Number.parseInt(monthStr, 10);
+  const startDate = `${yearStr}-${monthStr}-01`;
+  // Last day of the month: day 0 of next month
+  const lastDay = new Date(year, month, 0).getDate();
+  const endDate = `${yearStr}-${monthStr}-${String(lastDay).padStart(2, "0")}`;
+
+  return getNutritionDashboardRange({
+    actorMemberId: input.actorMemberId,
+    startDate,
+    endDate,
+    memberId: input.memberId,
+  });
+}
+
+/**
+ * Weekly view — now delegates to the generic range function.
+ * Returns backward-compatible shape with weekStart/weekEnd fields.
+ */
+export async function getNutritionDashboardWeekly(input: {
+  actorMemberId: string;
+  weekStart: string;
+  memberId?: string;
+}) {
+  const weekEnd = addDays(input.weekStart, 6);
+  const rangeResult = await getNutritionDashboardRange({
+    actorMemberId: input.actorMemberId,
+    startDate: input.weekStart,
+    endDate: weekEnd,
+    memberId: input.memberId,
+  });
+
+  // Map to backward-compatible response shape
+  return {
+    weekStart: input.weekStart,
+    weekEnd,
+    days: rangeResult.days,
+    averages: rangeResult.averages,
+    compliance: rangeResult.compliance,
+    nutrientGaps: rangeResult.nutrientGaps,
   };
 }
 

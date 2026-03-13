@@ -1,5 +1,5 @@
 import { db, executeRaw } from "../config/database.js";
-import { eq, and, desc } from "drizzle-orm";
+import { eq, and, desc, ilike } from "drizzle-orm";
 import {
   recipes,
   recipeIngredients,
@@ -29,6 +29,8 @@ function toNullableNumericString(value: number | string | null | undefined): str
 
 function normalizeRecipeInput(payload: AnyObj) {
   const cuisineRaw = payload.cuisine ?? (Array.isArray(payload.cuisines) ? payload.cuisines[0] : null);
+  // Fix 1: Read nutrition from nested object first, fallback to flat keys
+  const nut = (payload.nutrition && typeof payload.nutrition === "object") ? payload.nutrition : {};
   return {
     title: payload.title ?? "",
     description: payload.description ?? null,
@@ -42,30 +44,55 @@ function normalizeRecipeInput(payload: AnyObj) {
     cuisineLabel: cuisineRaw ? String(cuisineRaw) : null,
     instructions: payload.instructions ?? [],
     ingredients: Array.isArray(payload.ingredients) ? (payload.ingredients as IngredientInput[]) : [],
+    // Fix 4: pass percent_calories_* through
+    percent_calories_protein: payload.percent_calories_protein ?? null,
+    percent_calories_fat: payload.percent_calories_fat ?? null,
+    percent_calories_carbs: payload.percent_calories_carbs ?? null,
     nutrition: {
-      calories: payload.calories ?? null,
-      protein_g: payload.protein_g ?? null,
-      carbs_g: payload.carbs_g ?? null,
-      fat_g: payload.fat_g ?? null,
-      fiber_g: payload.fiber_g ?? null,
-      sugar_g: payload.sugar_g ?? null,
-      sodium_mg: payload.sodium_mg ?? null,
-      saturated_fat_g: payload.saturated_fat_g ?? null,
+      calories: nut.calories ?? payload.calories ?? null,
+      protein_g: nut.protein_g ?? payload.protein_g ?? null,
+      carbs_g: nut.carbs_g ?? payload.carbs_g ?? null,
+      fat_g: nut.fat_g ?? payload.fat_g ?? null,
+      fiber_g: nut.fiber_g ?? payload.fiber_g ?? null,
+      sugar_g: nut.sugar_g ?? payload.sugar_g ?? null,
+      sodium_mg: nut.sodium_mg ?? payload.sodium_mg ?? null,
+      saturated_fat_g: nut.saturated_fat_g ?? payload.saturated_fat_g ?? null,
     },
   };
 }
 
+// Fix 5: Infer source_type from ingredient name for new user-generated ingredients
+function inferSourceType(name: string): string | null {
+  const lower = name.toLowerCase();
+  if (/\b(chicken|beef|pork|lamb|turkey|venison|bacon|ham|sausage|steak|veal)\b/.test(lower)) return "animal";
+  if (/\b(salmon|tuna|cod|tilapia|trout|sardine|anchov|mackerel|halibut|bass)\b/.test(lower)) return "fish";
+  if (/\b(shrimp|crab|lobster|clam|mussel|oyster|scallop|squid|prawn)\b/.test(lower)) return "shellfish";
+  if (/\b(milk|cream|cheese|yogurt|butter|whey|ghee|ricotta|parmesan|mozzarella|cheddar)\b/.test(lower)) return "dairy";
+  if (/\b(egg)\b/.test(lower)) return "egg";
+  if (/\b(mushroom|truffle|yeast)\b/.test(lower)) return "fungal";
+  // Default to plant for vegetables, fruits, grains, spices, oils
+  return "plant";
+}
+
+// Fix 5+6: Case-insensitive matching + enriched creation
 async function getOrCreateIngredientId(name: string) {
+  // Fix 6: case-insensitive matching to avoid duplicates
   const existing = await db
     .select()
     .from(ingredients)
-    .where(eq(ingredients.name, name))
+    .where(ilike(ingredients.name, name))
     .limit(1);
   if (existing[0]?.id) return existing[0].id;
+
+  // Fix 5: Enrich new ingredients with metadata
   const created = await db
     .insert(ingredients)
     .values({
       name,
+      category: "user_generated",
+      sourceType: inferSourceType(name),
+      isAllergen: false,
+      isAdditive: false,
       createdAt: new Date(),
       updatedAt: new Date(),
     })
@@ -200,6 +227,12 @@ export async function createUserRecipe(b2cCustomerId: string, payload: AnyObj) {
   const cuisineIds = input.cuisineLabel ? await resolveCuisineIds([input.cuisineLabel]) : [];
   const cuisineId = cuisineIds[0] ?? null;
 
+  const toNumStr = (v: any): string | null => {
+    if (v == null) return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? String(n) : null;
+  };
+
   const [row] = await db
     .insert(recipes)
     .values({
@@ -215,6 +248,10 @@ export async function createUserRecipe(b2cCustomerId: string, payload: AnyObj) {
       servings: input.servings ?? 1,
       sourceType: "user_generated",
       createdByUserId: b2cCustomerId,
+      // Fix 4: Insert percent_calories_* into recipe row
+      percentCaloriesProtein: toNumStr(input.percent_calories_protein),
+      percentCaloriesFat: toNumStr(input.percent_calories_fat),
+      percentCaloriesCarbs: toNumStr(input.percent_calories_carbs),
       createdAt: new Date(),
       updatedAt: new Date(),
       instructions: Array.isArray(input.instructions) ? input.instructions : [],

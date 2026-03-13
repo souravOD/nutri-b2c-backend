@@ -32,6 +32,8 @@ const envSchema = z.object({
   USE_GRAPH_SCANNER: z.string().default("false"),
   USE_GRAPH_MEAL_LOG: z.string().default("false"),
   USE_GRAPH_CHATBOT: z.string().default("false"),
+  USE_GRAPH_NOTIFICATION: z.string().default("false"),
+  NOTIFICATION_CRON_ENABLED: z.string().default("false"),
 });
 
 function validateEnv() {

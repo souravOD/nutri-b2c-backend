@@ -153,6 +153,7 @@ export interface PlanGenerationContext {
   excludeRecipeIds: string[];
   maxCookTime?: number;
   preferredCuisines?: string[];
+  userPrompt?: string;
 }
 
 export interface LLMPlanMeal {
@@ -200,6 +201,8 @@ STRICT RULES:
 6. Balance variety across cuisines and meal types
 7. Respect cooking time constraints
 8. For each meal, estimate the grocery cost in the given currency
+9. ZERO dietary preference violations — if a member follows a diet (Vegan, Vegetarian, etc.), NEVER select recipes containing meat, fish, dairy, eggs, or any forbidden ingredient for that diet. This is as critical as allergen safety.
+10. If a USER REQUEST is provided, prioritize recipes that best fulfill that request while still honoring all safety rules above
 
 Return ONLY valid JSON with this exact schema:
 {
@@ -290,6 +293,7 @@ MEALS PER DAY: ${context.mealsPerDay.join(", ")}
 ${context.budgetAmount ? `BUDGET: ${context.budgetAmount} ${context.budgetCurrency || "USD"} for the entire plan` : "NO BUDGET CONSTRAINT"}
 ${context.maxCookTime ? `MAX COOK TIME: ${context.maxCookTime} minutes per meal` : ""}
 ${context.preferredCuisines?.length ? `PREFERRED CUISINES: ${context.preferredCuisines.join(", ")}` : ""}
+${context.userPrompt ? `\nUSER REQUEST: "${context.userPrompt}"\nPrioritize recipes that best fulfill this request while honoring all dietary and allergen constraints.` : ""}
 ${context.excludeRecipeIds.length ? `EXCLUDED RECIPE IDS (do NOT use these): ${context.excludeRecipeIds.join(", ")}` : ""}
 ${graphInstruction}
 AVAILABLE RECIPES (pick ONLY from these):

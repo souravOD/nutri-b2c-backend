@@ -5,6 +5,7 @@ import { authMiddleware } from "../middleware/auth.js";
 import { rateLimitMiddleware } from "../middleware/rateLimit.js";
 import { requireB2cCustomerIdFromReq } from "../services/b2cIdentity.js";
 import { AppError } from "../middleware/errorHandler.js";
+import { requireHouseholdRole, requireProfileEditAccess } from "../middleware/householdPermission.js";
 import {
   getOrCreateHousehold,
   getHouseholdMembers,
@@ -27,6 +28,8 @@ function b2cId(req: Request): string {
 const addMemberSchema = z.object({
   fullName: z.string().min(1).max(255),
   firstName: z.string().max(100).optional(),
+  email: z.string().email().max(255).optional().nullable(),
+  dateOfBirth: z.string().optional().nullable(),
   age: z.number().int().min(0).max(120).optional(),
   gender: z.enum(["male", "female", "other", "prefer_not_to_say"]).optional(),
   householdRole: z.enum(["primary_adult", "secondary_adult", "child", "dependent"]).optional(),
@@ -35,6 +38,8 @@ const addMemberSchema = z.object({
 const updateMemberSchema = z.object({
   fullName: z.string().min(1).max(255).optional(),
   firstName: z.string().max(100).optional(),
+  email: z.string().email().max(255).optional().nullable(),
+  dateOfBirth: z.string().optional().nullable(),
   age: z.number().int().min(0).max(120).optional(),
   gender: z.enum(["male", "female", "other", "prefer_not_to_say"]).optional(),
   householdRole: z.enum(["primary_adult", "secondary_adult", "child", "dependent"]).optional(),
@@ -48,9 +53,12 @@ const updateHealthSchema = z.object({
   targetFiberG: z.number().positive().optional(),
   targetSodiumMg: z.number().int().positive().optional(),
   targetSugarG: z.number().positive().optional(),
+  healthGoal: z.string().max(100).optional().nullable(),
+  dislikedIngredients: z.array(z.string()).optional(),
   allergenIds: z.array(z.string().uuid()).optional(),
   dietIds: z.array(z.string().uuid()).optional(),
   conditionIds: z.array(z.string().uuid()).optional(),
+  cuisineIds: z.array(z.string().uuid()).optional(),
 });
 
 // ── Routes ──────────────────────────────────────────────────────────────────
@@ -75,6 +83,7 @@ router.get(
 router.post(
   "/members",
   rateLimitMiddleware,
+  requireHouseholdRole("primary_adult"),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const customerId = b2cId(req);
@@ -109,6 +118,7 @@ router.get(
 router.patch(
   "/members/:id",
   rateLimitMiddleware,
+  requireProfileEditAccess,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const parsed = updateMemberSchema.parse(req.body);
@@ -127,6 +137,7 @@ router.patch(
 router.patch(
   "/members/:id/health",
   rateLimitMiddleware,
+  requireProfileEditAccess,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const parsed = updateHealthSchema.parse(req.body);
@@ -142,6 +153,7 @@ router.patch(
 router.delete(
   "/members/:id",
   rateLimitMiddleware,
+  requireHouseholdRole("primary_adult"),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const customerId = b2cId(req);
