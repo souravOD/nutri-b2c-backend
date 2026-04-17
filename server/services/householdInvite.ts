@@ -19,6 +19,21 @@ export async function createInvitation(
   role: string = "secondary_adult",
   invitedEmail?: string
 ): Promise<HouseholdInvitation> {
+  // SEC-4: Throttle — max 20 invitations per hour per user
+  // Must run BEFORE revoking old invites to avoid orphaning the recipient
+  const [recentCount] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(householdInvitations)
+    .where(
+      and(
+        eq(householdInvitations.invitedBy, invitedBy),
+        gt(householdInvitations.createdAt, new Date(Date.now() - 3_600_000))
+      )
+    );
+  if (Number(recentCount.count) >= 20) {
+    throw new AppError(429, "Too Many Requests", "Maximum 20 invitations per hour");
+  }
+
   // E6: Auto-revoke any existing pending invites for same email+household
   if (invitedEmail) {
     await db
@@ -33,7 +48,8 @@ export async function createInvitation(
       );
   }
 
-  const token = crypto.randomUUID();
+  // SEC-3: 256-bit token (64-char hex) instead of UUIDv4 (122-bit)
+  const token = crypto.randomBytes(32).toString("hex");
   const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
 
   const [invitation] = await db
@@ -149,6 +165,19 @@ export async function acceptInvitation(
 
     if (!acceptor) {
       throw new AppError(404, "Not Found", "User not found");
+    }
+
+    // SEC-7: Email enforcement — when invite specifies an email, only that email can accept
+    if (invitation.invitedEmail) {
+      const acceptorEmail = acceptor.email?.toLowerCase().trim();
+      const invitedEmail = invitation.invitedEmail.toLowerCase().trim();
+      if (acceptorEmail !== invitedEmail) {
+        throw new AppError(
+          403,
+          "Forbidden",
+          "This invitation was sent to a specific email address. Please sign in with that email to accept."
+        );
+      }
     }
 
     const oldHouseholdId = acceptor.householdId;
@@ -305,6 +334,57 @@ export async function listHouseholdInvitations(householdId: string) {
         eq(householdInvitations.status, "pending")
       )
     );
+}
+
+// ── Get Invitation Preview (unauthenticated) ───────────────────────────────
+// Returns display-safe fields only — no IDs, tokens, or sensitive data.
+
+export async function getInvitationPreview(token: string) {
+  const [raw] = await db
+    .select()
+    .from(householdInvitations)
+    .where(eq(householdInvitations.inviteToken, token))
+    .limit(1);
+
+  if (!raw) {
+    throw new AppError(404, "Not Found", "Invitation not found");
+  }
+  if (raw.status === "accepted") {
+    throw new AppError(410, "Gone", "This invitation has already been accepted.");
+  }
+  if (raw.status === "revoked") {
+    throw new AppError(410, "Gone", "This invitation was cancelled by the sender.");
+  }
+  if (raw.status === "expired" || new Date(raw.expiresAt) < new Date()) {
+    throw new AppError(410, "Gone", "This invitation has expired. Ask the sender for a new one.");
+  }
+
+  const [household] = await db
+    .select({
+      name: households.householdName,
+      type: households.householdType,
+      totalMembers: households.totalMembers,
+    })
+    .from(households)
+    .where(eq(households.id, raw.householdId))
+    .limit(1);
+
+  const [inviter] = await db
+    .select({ name: b2cCustomers.fullName })
+    .from(b2cCustomers)
+    .where(eq(b2cCustomers.id, raw.invitedBy))
+    .limit(1);
+
+  return {
+    status: "pending" as const,
+    householdName: household?.name ?? "Unknown Household",
+    householdType: household?.type ?? "individual",
+    totalMembers: household?.totalMembers ?? 1,
+    invitedByName: inviter?.name ?? "Someone",
+    role: raw.role,
+    expiresAt: raw.expiresAt,
+    requiresSpecificEmail: !!raw.invitedEmail,
+  };
 }
 
 // ── Cleanup Expired Invitations ─────────────────────────────────────────────
