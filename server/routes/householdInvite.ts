@@ -3,15 +3,21 @@ import type { Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { authMiddleware } from "../middleware/auth.js";
 import { rateLimitMiddleware } from "../middleware/rateLimit.js";
+import { ipRateLimitMiddleware } from "../middleware/ipRateLimit.js";
 import { requireB2cCustomerIdFromReq } from "../services/b2cIdentity.js";
 import { getOrCreateHousehold } from "../services/household.js";
 import {
   createInvitation,
   getInvitationByToken,
+  getInvitationPreview,
   acceptInvitation,
   revokeInvitation,
   listHouseholdInvitations,
 } from "../services/householdInvite.js";
+import { sendInvitationEmail } from "../services/emailService.js";
+import { db } from "../config/database.js";
+import { eq } from "drizzle-orm";
+import { b2cCustomers, households } from "../../shared/goldSchema.js";
 
 const router = Router();
 
@@ -79,10 +85,36 @@ router.post(
         process.env.FRONTEND_URL || "https://app.nutrismarts.ai"
       }/join?token=${invitation.inviteToken}`;
 
+      // Fire-and-forget email delivery when invitedEmail is provided
+      let emailQueued = false;
+      if (parsed.invitedEmail) {
+        const [inviter] = await db
+          .select({ name: b2cCustomers.fullName })
+          .from(b2cCustomers)
+          .where(eq(b2cCustomers.id, customerId))
+          .limit(1);
+        const [hh] = await db
+          .select({ name: households.householdName })
+          .from(households)
+          .where(eq(households.id, household.id))
+          .limit(1);
+
+        sendInvitationEmail({
+          to: parsed.invitedEmail,
+          inviterName: inviter?.name ?? "Someone",
+          householdName: hh?.name ?? "their household",
+          role: parsed.role,
+          inviteUrl,
+          expiresAt: invitation.expiresAt,
+        }).catch((err) => console.error("[invite-email] send failed:", err));
+        emailQueued = true;
+      }
+
       res.status(201).json({
         invitation,
         inviteUrl,
         expiresAt: invitation.expiresAt,
+        emailQueued,
       });
     } catch (err) {
       next(err);
@@ -151,6 +183,36 @@ export default router;
 // invited user (not necessarily the household owner)
 
 export const invitationTokenRouter = Router();
+
+/**
+ * @openapi
+ * /invitations/{token}/preview:
+ *   get:
+ *     tags: [Household Invites]
+ *     summary: Get invitation preview (unauthenticated)
+ *     description: Returns display-safe invitation details without requiring authentication.
+ *     parameters:
+ *       - in: path
+ *         name: token
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Invitation preview }
+ *       404: { description: Invitation not found }
+ *       410: { description: Invitation expired, accepted, or revoked }
+ */
+invitationTokenRouter.get(
+  "/:token/preview",
+  ipRateLimitMiddleware(30), // SEC-1: IP-based, 30 req/min
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const details = await getInvitationPreview(req.params.token);
+      res.json(details);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
 
 /**
  * @openapi

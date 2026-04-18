@@ -198,7 +198,7 @@ STRICT RULES (must NEVER be violated):
 2. ZERO allergen violations — if ANY family member is allergic to something, exclude ALL recipes containing that allergen
 3. Stay within the budget constraint if provided
 4. Meet each member's calorie/macro targets within ±10%
-5. No repeat recipes within the same week (unless fewer recipes than meal slots)
+5. Each recipe ID must appear at most ONCE in the entire plan — never assign the same recipe to different meal types or different days. If the candidate pool is smaller than the number of meal slots, only then may you repeat, and prefer maximum variety
 6. Balance variety across cuisines and meal types
 7. Respect cooking time constraints
 8. For each meal, estimate the grocery cost in the given currency

@@ -85,6 +85,7 @@ interface GroceryListItemDetail {
   currentProductName: string | null;
   currentProductBrand: string | null;
   currentProductUrl: string | null;
+  currentProductImageUrl: string | null;
 }
 
 function n(value: number | string | null | undefined): number {
@@ -418,12 +419,12 @@ async function listItemsWithSummary(listId: string) {
   const productRows = currentProductIds.length
     ? ((await executeRaw(
       `
-      SELECT id, name, brand, product_url
+      SELECT id, name, brand, product_url, image_url
       FROM gold.products
       WHERE id = ANY($1::uuid[])
       `,
       [currentProductIds]
-    )) as unknown as { id: string; name: string | null; brand: string | null; product_url: string | null }[])
+    )) as unknown as { id: string; name: string | null; brand: string | null; product_url: string | null; image_url: string | null }[])
     : [];
 
   const productMap = new Map(productRows.map((row) => [row.id, row]));
@@ -437,6 +438,7 @@ async function listItemsWithSummary(listId: string) {
       currentProductName: product?.name ?? null,
       currentProductBrand: product?.brand ?? null,
       currentProductUrl: product?.product_url ?? null,
+      currentProductImageUrl: product?.image_url ?? null,
     };
   });
 
@@ -548,7 +550,7 @@ export async function generateGroceryList(
       sourceType: selected ? "product" as const : "ingredient" as const,
       quantity: String(round2(bucket.quantity)),
       unit: bucket.unit,
-      category: selected?.category_name ?? bucket.ingredientCategory ?? "Other",
+      category: selected?.category_name ?? "Uncategorized",
       estimatedPrice: estimatedPrice != null ? String(estimatedPrice) : null,
       actualPrice: null,
       isPurchased: false,

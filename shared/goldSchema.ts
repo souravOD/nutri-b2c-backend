@@ -51,6 +51,7 @@ export const b2cCustomers = gold.table("b2c_customers", {
   updatedAt: timestamp("updated_at").defaultNow(),
   appwriteUserId: text("appwrite_user_id").unique(),
   silverCustomerId: uuid("silver_customer_id"),
+  deletionScheduledAt: timestamp("deletion_scheduled_at"),
 });
 
 export const b2cCustomerHealthProfiles = gold.table("b2c_customer_health_profiles", {

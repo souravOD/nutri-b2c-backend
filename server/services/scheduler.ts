@@ -3,6 +3,8 @@
 import cron from "node-cron";
 import { executeRaw } from "../config/database.js";
 import { evaluateAndDispatchNotifications } from "./notificationEngine.js";
+import { deleteAppwriteUserDirect, deleteAppwriteDocumentsDirect } from "./appwrite.js";
+import { hardDeleteUser } from "../routes/user.js";
 import { logger } from "../config/logger.js";
 
 const CRON_ENABLED = process.env.NOTIFICATION_CRON_ENABLED === "true";
@@ -10,6 +12,8 @@ const MORNING_SCHEDULE = process.env.NOTIFICATION_CRON_MORNING ?? "0 8 * * *";
 const EVENING_SCHEDULE = process.env.NOTIFICATION_CRON_EVENING ?? "0 18 * * *";
 const BATCH_SIZE = parseInt(process.env.NOTIFICATION_CRON_BATCH_SIZE ?? "100", 10);
 const CLEANUP_SCHEDULE = process.env.NOTIFICATION_CLEANUP_CRON ?? "0 3 * * 0"; // Sunday 3 AM
+const PURGE_SCHEDULE = process.env.ACCOUNT_PURGE_CRON ?? "0 2 * * *";           // Daily 2 AM
+const APPWRITE_RETRY_SCHEDULE = process.env.APPWRITE_RETRY_CRON ?? "0 * * * *"; // Hourly
 
 async function runNotificationBatch(): Promise<void> {
   const startMs = Date.now();
@@ -100,7 +104,152 @@ async function runNotificationCleanup(): Promise<void> {
   }
 }
 
+// ── Phase 2: Daily Account Purge ──────────────────────────────────────────────
+
+async function runAccountPurge(): Promise<void> {
+  const startMs = Date.now();
+  logger.info("[scheduler] Account purge starting...");
+
+  try {
+    const expired = (await executeRaw(
+      `SELECT id, appwrite_user_id FROM gold.b2c_customers
+       WHERE account_status = 'pending_deletion'
+       AND deletion_scheduled_at <= NOW()`,
+      []
+    )) as unknown as { id: string; appwrite_user_id: string }[];
+
+    if (expired.length === 0) {
+      logger.info("[scheduler] Account purge: no expired accounts");
+      return;
+    }
+
+    let success = 0;
+    let errors = 0;
+
+    for (const row of expired) {
+      try {
+        await hardDeleteUser(row.id, row.appwrite_user_id);
+        success++;
+        logger.info(`[scheduler] Purged account ${row.id}`);
+      } catch (err) {
+        errors++;
+        logger.error({ err, userId: row.id }, "[scheduler] Account purge failed for user");
+      }
+    }
+
+    const elapsedMs = Date.now() - startMs;
+    logger.info(
+      `[scheduler] Account purge complete: ${success} purged, ${errors} failed, ${elapsedMs}ms`
+    );
+  } catch (err) {
+    logger.error("[scheduler] Account purge batch failed:", err);
+  }
+}
+
+// ── Phase 4: Appwrite Cleanup Retry ───────────────────────────────────────────
+
+async function runAppwriteCleanupRetry(): Promise<void> {
+  const startMs = Date.now();
+
+  try {
+    const pending = (await executeRaw(
+      `SELECT id, appwrite_user_id, operation, attempts
+       FROM gold.b2c_appwrite_cleanup_queue
+       WHERE completed_at IS NULL
+         AND attempts < max_attempts
+         AND next_retry_at <= NOW()
+       ORDER BY created_at
+       LIMIT 10`,
+      []
+    )) as unknown as {
+      id: string;
+      appwrite_user_id: string;
+      operation: string;
+      attempts: number;
+    }[];
+
+    if (pending.length === 0) return;
+
+    logger.info(`[scheduler] Appwrite retry: ${pending.length} pending jobs`);
+
+    let success = 0;
+    let failed = 0;
+
+    for (const job of pending) {
+      try {
+        switch (job.operation) {
+          case "delete_user":
+            await deleteAppwriteUserDirect(job.appwrite_user_id);
+            break;
+          case "delete_documents":
+            await deleteAppwriteDocumentsDirect(job.appwrite_user_id);
+            break;
+          case "disable_user": {
+            // Re-use admin client inline — disableAppwriteUser has its own queue fallback
+            const { Client, Users } = await import("node-appwrite");
+            const client = new Client()
+              .setEndpoint(process.env.APPWRITE_ENDPOINT!)
+              .setProject(process.env.APPWRITE_PROJECT_ID!)
+              .setKey(process.env.APPWRITE_API_KEY!);
+            await new Users(client).updateStatus(job.appwrite_user_id, false);
+            break;
+          }
+        }
+
+        // Mark completed
+        await executeRaw(
+          `UPDATE gold.b2c_appwrite_cleanup_queue SET completed_at = NOW() WHERE id = $1`,
+          [job.id]
+        );
+        success++;
+        logger.info(`[scheduler] Appwrite retry succeeded: ${job.operation} for ${job.appwrite_user_id}`);
+      } catch (e: any) {
+        failed++;
+        const errMsg = e?.message ?? String(e);
+        // Exponential backoff: 15m → 30m → 60m
+        const backoffMinutes = Math.pow(2, job.attempts) * 15;
+
+        await executeRaw(
+          `UPDATE gold.b2c_appwrite_cleanup_queue
+           SET attempts = attempts + 1,
+               last_error = $2,
+               next_retry_at = NOW() + INTERVAL '1 minute' * $3
+           WHERE id = $1`,
+          [job.id, errMsg, backoffMinutes]
+        );
+
+        // Dead-letter alert: if this was the last attempt
+        if (job.attempts + 1 >= 3) {
+          logger.error(
+            { userId: job.appwrite_user_id, operation: job.operation, attempts: job.attempts + 1 },
+            "[scheduler] ⚠️ APPWRITE CLEANUP EXHAUSTED — manual intervention required"
+          );
+        }
+      }
+    }
+
+    const elapsed = Date.now() - startMs;
+    if (success + failed > 0) {
+      logger.info(`[scheduler] Appwrite retry complete: ${success} ok, ${failed} failed, ${elapsed}ms`);
+    }
+  } catch (err) {
+    logger.error("[scheduler] Appwrite retry batch failed:", err);
+  }
+}
+
 export function initScheduler(): void {
+  // ── Account lifecycle crons (always active — independent of notification toggle) ──
+  cron.schedule(PURGE_SCHEDULE, runAccountPurge, {
+    timezone: "America/New_York",
+  });
+  cron.schedule(APPWRITE_RETRY_SCHEDULE, runAppwriteCleanupRetry, {
+    timezone: "America/New_York",
+  });
+  logger.info(
+    `[scheduler] Account crons active: purge=${PURGE_SCHEDULE}, appwrite-retry=${APPWRITE_RETRY_SCHEDULE}`
+  );
+
+  // ── Notification crons (opt-in via NOTIFICATION_CRON_ENABLED) ──
   if (!CRON_ENABLED) {
     logger.info("[scheduler] Notification cron disabled (NOTIFICATION_CRON_ENABLED != true)");
     return;
@@ -115,6 +264,7 @@ export function initScheduler(): void {
     return;
   }
 
+  // Notification crons
   cron.schedule(MORNING_SCHEDULE, runNotificationBatch, {
     timezone: "America/New_York",
   });
@@ -126,6 +276,7 @@ export function initScheduler(): void {
   });
 
   logger.info(
-    `[scheduler] Notification cron active: morning=${MORNING_SCHEDULE}, evening=${EVENING_SCHEDULE}, cleanup=${CLEANUP_SCHEDULE}`
+    `[scheduler] Notification crons active: morning=${MORNING_SCHEDULE}, evening=${EVENING_SCHEDULE}, ` +
+    `cleanup=${CLEANUP_SCHEDULE}`
   );
 }

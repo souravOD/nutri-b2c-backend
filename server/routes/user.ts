@@ -25,7 +25,7 @@ import {
   b2cCustomerSettings,
   households,
 } from "../../shared/goldSchema.js";
-import { eq } from "drizzle-orm";
+import { eq, ne, and } from "drizzle-orm";
 import { getOrCreateHousehold } from "../services/household.js";
 import {
   getSavedRecipes,
@@ -42,7 +42,7 @@ import {
   submitForReview,
   getUserRecipes,
 } from "../services/userContent.js";
-import { deleteAppwriteDocuments, deleteAppwriteUser, updateAppwriteProfile, updateAppwriteHealth } from "../services/appwrite.js";
+import { deleteAppwriteDocuments, deleteAppwriteUser, disableAppwriteUser, enableAppwriteUser, updateAppwriteProfile, updateAppwriteHealth } from "../services/appwrite.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { logLogout } from "../services/sessionTracking.js";
 import { logger } from "../config/logger.js";
@@ -67,7 +67,6 @@ function toNullableNumericString(value: number | null | undefined): string | nul
 
 const profileSchema = z.object({
   fullName: z.string().min(1).optional().nullable(),
-  email: z.string().email().optional().nullable(),
   phone: z.string().optional().nullable(),
   dateOfBirth: z.string().optional().nullable(),
   gender: z.string().optional().nullable(),
@@ -185,7 +184,6 @@ router.patch("/profile", authMiddleware, rateLimitMiddleware, async (req, res, n
       updatedAt: new Date(),
     };
     if (body.fullName !== undefined) update.fullName = body.fullName;
-    if (body.email !== undefined) update.email = body.email;
     if (body.phone !== undefined) update.phone = body.phone;
     if (body.dateOfBirth !== undefined) update.dateOfBirth = body.dateOfBirth;
     if (body.gender !== undefined) update.gender = body.gender;
@@ -204,7 +202,6 @@ router.patch("/profile", authMiddleware, rateLimitMiddleware, async (req, res, n
     // Write-back to Appwrite to keep both stores in sync
     void updateAppwriteProfile(appwriteUserId(req), {
       displayName: body.fullName,
-      email: body.email,
     });
 
     // ── HIPAA Audit: PII mutation ──
@@ -760,87 +757,283 @@ router.post("/my-recipes/:id/submit", authMiddleware, rateLimitMiddleware, async
  *     responses:
  *       204: { description: Account deleted }
  */
-router.delete("/account", authMiddleware, rateLimitMiddleware, async (req, res, next) => {
+// ── Hard-delete helper (used by soft-delete purge cron) ──────────────────────
+
+export async function hardDeleteUser(customerId: string, awUserId: string) {
+  await executeRaw("BEGIN");
   try {
-    const id = b2cCustomerId(req);
-    const awUserId = appwriteUserId(req);
-
-    await executeRaw("BEGIN");
-
     // ── Recipe-related (children first) ──
     await executeRaw(
       "DELETE FROM gold.recipe_nutrition_profiles WHERE recipe_id IN (SELECT id FROM gold.recipes WHERE created_by_user_id = $1)",
-      [id]
+      [customerId]
     );
     await executeRaw(
       "DELETE FROM gold.recipe_ingredients WHERE recipe_id IN (SELECT id FROM gold.recipes WHERE created_by_user_id = $1)",
-      [id]
+      [customerId]
     );
     await executeRaw(
       "DELETE FROM gold.nutrition_facts WHERE entity_type = 'recipe' AND entity_id IN (SELECT id FROM gold.recipes WHERE created_by_user_id = $1)",
-      [id]
+      [customerId]
     );
-    await executeRaw("DELETE FROM gold.recipes WHERE created_by_user_id = $1", [id]);
+    await executeRaw("DELETE FROM gold.recipes WHERE created_by_user_id = $1", [customerId]);
 
     // ── Meal logs (children → parent) ──
     await executeRaw(
       "DELETE FROM gold.meal_log_item_nutrients WHERE meal_log_item_id IN (SELECT id FROM gold.meal_log_items WHERE meal_log_id IN (SELECT id FROM gold.meal_logs WHERE b2c_customer_id = $1))",
-      [id]
+      [customerId]
     );
     await executeRaw(
       "DELETE FROM gold.meal_log_items WHERE meal_log_id IN (SELECT id FROM gold.meal_logs WHERE b2c_customer_id = $1)",
-      [id]
+      [customerId]
     );
-    await executeRaw("DELETE FROM gold.meal_logs WHERE b2c_customer_id = $1", [id]);
+    await executeRaw("DELETE FROM gold.meal_logs WHERE b2c_customer_id = $1", [customerId]);
 
     // ── Meal plans (children → parent) ──
     await executeRaw(
       "DELETE FROM gold.meal_plan_items WHERE meal_plan_id IN (SELECT id FROM gold.meal_plans WHERE b2c_customer_id = $1)",
-      [id]
+      [customerId]
     );
-    await executeRaw("DELETE FROM gold.meal_plans WHERE b2c_customer_id = $1", [id]);
+    await executeRaw("DELETE FROM gold.meal_plans WHERE b2c_customer_id = $1", [customerId]);
 
     // ── Shopping lists ──
     await executeRaw(
       "DELETE FROM gold.shopping_list_items WHERE shopping_list_id IN (SELECT id FROM gold.shopping_lists WHERE b2c_customer_id = $1)",
-      [id]
+      [customerId]
     );
-    await executeRaw("DELETE FROM gold.shopping_lists WHERE b2c_customer_id = $1", [id]);
+    await executeRaw("DELETE FROM gold.shopping_lists WHERE b2c_customer_id = $1", [customerId]);
 
     // ── Interactions & ratings ──
-    await executeRaw("DELETE FROM gold.customer_product_interactions WHERE b2c_customer_id = $1", [id]);
-    await executeRaw("DELETE FROM gold.recipe_ratings WHERE b2c_customer_id = $1", [id]);
+    await executeRaw("DELETE FROM gold.customer_product_interactions WHERE b2c_customer_id = $1", [customerId]);
+    await executeRaw("DELETE FROM gold.recipe_ratings WHERE b2c_customer_id = $1", [customerId]);
 
     // ── Health & preferences ──
-    await executeRaw("DELETE FROM gold.b2c_customer_weight_history WHERE b2c_customer_id = $1", [id]);
-    await executeRaw("DELETE FROM gold.b2c_customer_health_profiles WHERE b2c_customer_id = $1", [id]);
-    await executeRaw("DELETE FROM gold.b2c_customer_allergens WHERE b2c_customer_id = $1", [id]);
-    await executeRaw("DELETE FROM gold.b2c_customer_dietary_preferences WHERE b2c_customer_id = $1", [id]);
-    await executeRaw("DELETE FROM gold.b2c_customer_health_conditions WHERE b2c_customer_id = $1", [id]);
-    await executeRaw("DELETE FROM gold.b2c_customer_cuisine_preferences WHERE b2c_customer_id = $1", [id]);
+    await executeRaw("DELETE FROM gold.b2c_customer_weight_history WHERE b2c_customer_id = $1", [customerId]);
+    await executeRaw("DELETE FROM gold.b2c_customer_health_profiles WHERE b2c_customer_id = $1", [customerId]);
+    await executeRaw("DELETE FROM gold.b2c_customer_allergens WHERE b2c_customer_id = $1", [customerId]);
+    await executeRaw("DELETE FROM gold.b2c_customer_dietary_preferences WHERE b2c_customer_id = $1", [customerId]);
+    await executeRaw("DELETE FROM gold.b2c_customer_health_conditions WHERE b2c_customer_id = $1", [customerId]);
+    await executeRaw("DELETE FROM gold.b2c_customer_cuisine_preferences WHERE b2c_customer_id = $1", [customerId]);
 
     // ── Settings ──
-    await executeRaw("DELETE FROM gold.b2c_customer_settings WHERE b2c_customer_id = $1", [id]);
+    await executeRaw("DELETE FROM gold.b2c_customer_settings WHERE b2c_customer_id = $1", [customerId]);
+
+    // ── Phase 1: Previously missing tables (PII purge) ──
+    await executeRaw("DELETE FROM gold.b2c_session_events WHERE b2c_customer_id = $1", [customerId]);
+    await executeRaw("DELETE FROM gold.b2c_feature_events WHERE b2c_customer_id = $1", [customerId]);
+    await executeRaw("DELETE FROM gold.b2c_nps_responses WHERE b2c_customer_id = $1", [customerId]);
+    await executeRaw("DELETE FROM gold.b2c_beta_feedback WHERE b2c_customer_id = $1", [customerId]);
+    await executeRaw("DELETE FROM gold.b2c_feedback_throttle WHERE b2c_customer_id = $1", [customerId]);
+    await executeRaw("DELETE FROM gold.chat_sessions WHERE b2c_customer_id = $1", [customerId]);
+    await executeRaw("DELETE FROM gold.scan_history WHERE b2c_customer_id = $1", [customerId]);
+    await executeRaw("DELETE FROM gold.b2c_notification_dispatch_log WHERE b2c_customer_id = $1", [customerId]);
+    await executeRaw("DELETE FROM gold.b2c_notifications WHERE customer_id = $1", [customerId]);
+    await executeRaw("DELETE FROM gold.meal_log_streaks WHERE b2c_customer_id = $1", [customerId]);
+    await executeRaw("DELETE FROM gold.meal_log_templates WHERE b2c_customer_id = $1", [customerId]);
+    await executeRaw("DELETE FROM gold.household_invitations WHERE invited_by = $1", [customerId]);
 
     // ── Customer record itself (last) ──
-    await executeRaw("DELETE FROM gold.b2c_customers WHERE id = $1", [id]);
+    await executeRaw("DELETE FROM gold.b2c_customers WHERE id = $1", [customerId]);
 
     await executeRaw("COMMIT");
+  } catch (err) {
+    try { await executeRaw("ROLLBACK"); } catch { }
+    throw err;
+  }
 
-    // ── Appwrite cleanup (after Supabase commit succeeds) ──
-    await deleteAppwriteDocuments(awUserId);
-    await deleteAppwriteUser(awUserId);
+  // ── Appwrite cleanup (after Supabase commit) ──
+  await deleteAppwriteDocuments(awUserId);
+  await deleteAppwriteUser(awUserId);
+}
 
-    // ── HIPAA Audit: full account deletion ──
+// ── Phase 3: Pre-delete household check ──────────────────────────────────────
+
+router.post("/account/pre-delete-check", authMiddleware, rateLimitMiddleware, async (req, res, next) => {
+  try {
+    const id = b2cCustomerId(req);
+    const customer = await db.select().from(b2cCustomers).where(eq(b2cCustomers.id, id)).limit(1);
+    const householdId = customer[0]?.householdId;
+    const householdRole = customer[0]?.householdRole;
+
+    let householdType = "individual";
+    let otherMembers: { id: string; fullName: string; householdRole: string | null }[] = [];
+
+    if (householdId) {
+      const hh = await db.select().from(households).where(eq(households.id, householdId)).limit(1);
+      householdType = hh[0]?.householdType ?? "individual";
+
+      if (householdRole === "primary_adult") {
+        const members = await db.select({
+          id: b2cCustomers.id,
+          fullName: b2cCustomers.fullName,
+          householdRole: b2cCustomers.householdRole,
+        }).from(b2cCustomers)
+          .where(and(
+            eq(b2cCustomers.householdId, householdId),
+            ne(b2cCustomers.id, id),
+          ));
+        otherMembers = members;
+      }
+    }
+
+    res.json({
+      isPrimaryAdult: householdRole === "primary_adult",
+      householdType,
+      otherMembers,
+      secondaryAdults: otherMembers.filter(m => m.householdRole === "secondary_adult"),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── Phase 2: Soft-delete account ─────────────────────────────────────────────
+
+const deleteAccountSchema = z.object({
+  scope: z.enum(["my_account", "entire_household"]).default("my_account"),
+  newPrimaryId: z.string().uuid().optional(),
+});
+
+router.delete("/account", authMiddleware, rateLimitMiddleware, async (req, res, next) => {
+  try {
+    const id = b2cCustomerId(req);
+    const awUserId = appwriteUserId(req);
+    const { scope, newPrimaryId } = deleteAccountSchema.parse(req.body ?? {});
+
+    const customer = await db.select().from(b2cCustomers).where(eq(b2cCustomers.id, id)).limit(1);
+    if (!customer[0]) throw new AppError(404, "Not Found", "Customer not found");
+
+    const householdId = customer[0].householdId;
+    const isPrimary = customer[0].householdRole === "primary_adult";
+
+    // ── Phase 3: Household dissolution ──
+    if (isPrimary && householdId && scope === "my_account") {
+      // Find other members
+      const otherMembers = await db.select()
+        .from(b2cCustomers)
+        .where(and(
+          eq(b2cCustomers.householdId, householdId),
+          ne(b2cCustomers.id, id),
+        ));
+
+      if (otherMembers.length > 0) {
+        // Determine who becomes the new primary
+        const secondaryAdults = otherMembers.filter(m => m.householdRole === "secondary_adult");
+        let promotee = secondaryAdults.length === 1 ? secondaryAdults[0] : null;
+
+        if (newPrimaryId) {
+          promotee = otherMembers.find(m => m.id === newPrimaryId) ?? promotee;
+        }
+
+        if (!promotee && secondaryAdults.length > 1) {
+          return res.status(400).json({
+            error: "Must specify newPrimaryId when multiple secondary adults exist",
+          });
+        }
+
+        if (promotee) {
+          await db.update(b2cCustomers)
+            .set({ householdRole: "primary_adult", isProfileOwner: true })
+            .where(eq(b2cCustomers.id, promotee.id));
+          logger.info(`[account] Promoted ${promotee.id} to primary_adult for household ${householdId}`);
+        }
+      } else {
+        // Solo household — delete household + related records
+        await executeRaw("DELETE FROM gold.household_budgets WHERE household_id = $1", [householdId]);
+        await executeRaw("DELETE FROM gold.household_preferences WHERE household_id = $1", [householdId]);
+        await executeRaw("DELETE FROM gold.household_invitations WHERE household_id = $1", [householdId]);
+        await executeRaw("DELETE FROM gold.households WHERE id = $1", [householdId]);
+        logger.info(`[account] Deleted orphan household ${householdId}`);
+      }
+    } else if (isPrimary && householdId && scope === "entire_household") {
+      // Mark all other household members for deletion too
+      const otherMembers = await db.select()
+        .from(b2cCustomers)
+        .where(and(
+          eq(b2cCustomers.householdId, householdId),
+          ne(b2cCustomers.id, id),
+        ));
+
+      for (const member of otherMembers) {
+        await executeRaw(
+          `UPDATE gold.b2c_customers
+           SET account_status = 'pending_deletion',
+               deletion_scheduled_at = NOW() + INTERVAL '30 days',
+               updated_at = NOW()
+           WHERE id = $1`,
+          [member.id]
+        );
+        // Disable each member's Appwrite Auth (blocks login during grace period)
+        if (member.appwriteUserId) {
+          await disableAppwriteUser(member.appwriteUserId);
+        }
+      }
+      logger.info(`[account] Marked ${otherMembers.length} household members for deletion`);
+    }
+
+    // ── Soft-delete the requesting user ──
+    await executeRaw(
+      `UPDATE gold.b2c_customers
+       SET account_status = 'pending_deletion',
+           deletion_scheduled_at = NOW() + INTERVAL '30 days',
+           updated_at = NOW()
+       WHERE id = $1`,
+      [id]
+    );
+
+    // Disable Appwrite Auth (blocks login but preserves data for recovery)
+    await disableAppwriteUser(awUserId);
+
+    // ── HIPAA Audit ──
     void auditLogEntry(
-      (req as any).user?.userId, "delete_/user/account",
+      (req as any).user?.userId, "soft_delete_account",
       "b2c_customers", id, null, null,
       "user_initiated_account_deletion", req.ip, req.headers["user-agent"] as string | undefined
     );
 
-    res.status(204).end();
+    const deletionDate = new Date();
+    deletionDate.setDate(deletionDate.getDate() + 30);
+
+    res.json({
+      message: "Account scheduled for deletion",
+      deletionDate: deletionDate.toISOString(),
+      scope,
+    });
   } catch (err) {
-    try { await executeRaw("ROLLBACK"); } catch { }
+    next(err);
+  }
+});
+
+// ── Phase 2: Account recovery ────────────────────────────────────────────────
+
+router.post("/account/recover", authMiddleware, rateLimitMiddleware, async (req, res, next) => {
+  try {
+    const id = b2cCustomerId(req);
+    const awUserId = appwriteUserId(req);
+
+    const customer = await db.select().from(b2cCustomers).where(eq(b2cCustomers.id, id)).limit(1);
+    if (customer[0]?.accountStatus !== "pending_deletion") {
+      return res.status(400).json({ error: "Account is not pending deletion" });
+    }
+
+    // Re-enable Appwrite Auth user FIRST — if this fails, DB stays pending_deletion
+    // (safer failure mode: user can retry recovery)
+    await enableAppwriteUser(awUserId);
+
+    await executeRaw(
+      `UPDATE gold.b2c_customers
+       SET account_status = 'active', deletion_scheduled_at = NULL, updated_at = NOW()
+       WHERE id = $1`,
+      [id]
+    );
+
+    void auditLogEntry(
+      (req as any).user?.userId, "recover_account",
+      "b2c_customers", id, null, null,
+      "user_recovered_pending_deletion", req.ip, req.headers["user-agent"] as string | undefined
+    );
+
+    res.json({ message: "Account restored successfully" });
+  } catch (err) {
     next(err);
   }
 });

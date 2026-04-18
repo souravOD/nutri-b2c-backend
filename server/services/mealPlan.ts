@@ -301,64 +301,135 @@ async function fetchRecipeCatalog(params: {
 
 // ── Graph-Scored Recipe Candidates (PRD-12) ─────────────────────────────────
 
+const MEAL_TYPE_ORDER: Record<string, number> = {
+  breakfast: 0,
+  lunch: 1,
+  dinner: 2,
+  snack: 3,
+};
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function mapRagCandidates(
+  candidates: any[],
+  mealTypeOverride?: string | null
+): RecipeOption[] {
+  return candidates.map((c: any) => ({
+    id: c.recipe_id,
+    title: c.title,
+    mealType: mealTypeOverride ?? c.meal_type ?? null,
+    cuisine: c.cuisine ?? null,
+    calories: c.calories ?? 0,
+    proteinG: c.protein_g ?? 0,
+    carbsG: c.carbs_g ?? 0,
+    fatG: c.fat_g ?? 0,
+    cookTimeMinutes: c.cook_time_minutes ?? null,
+    allergens: c.allergens ?? [],
+    diets: c.diets ?? [],
+    graphScore: c.score,
+    graphReasons: c.reasons,
+  }));
+}
+
 async function getRecipeCandidates(
   b2cCustomerId: string,
   members: MemberContext[],
-  params: { cuisineIds?: string[]; maxCookTime?: number; excludeIds: string[]; limit: number; memberDiets?: string[] },
+  params: { cuisineIds?: string[]; maxCookTime?: number; excludeIds: string[]; limit: number; memberDiets?: string[]; mealTypes?: string[] },
   householdType?: string,
   totalMembers?: number,
   householdId?: string,
   scope?: string,
   memberProfile?: Record<string, unknown>
 ): Promise<RecipeOption[]> {
-  // Try RAG-scored candidates first
-  const graphCandidates = await ragMealCandidates({
+  const mealTypes = params.mealTypes;
+  const ragMembers = members.map((m, i) => ({
+    id: `member-${i}`,
+    allergen_ids: m.allergens,
+    diet_ids: m.diets,
+    health_profile: {
+      calorie_target: m.calorieTarget,
+      protein_target_g: m.proteinTargetG,
+    },
+  }));
+
+  const ragBaseParams = {
     customer_id: b2cCustomerId,
-    members: members.map((m, i) => ({
-      id: `member-${i}`,
-      allergen_ids: m.allergens,
-      diet_ids: m.diets,
-      health_profile: {
-        calorie_target: m.calorieTarget,
-        protein_target_g: m.proteinTargetG,
-      },
-    })),
+    members: ragMembers,
     meal_history: params.excludeIds,
     date_range: { start: new Date().toISOString().slice(0, 10), end: new Date().toISOString().slice(0, 10) },
-    meals_per_day: ["breakfast", "lunch", "dinner"],
-    limit: params.limit,
+    meals_per_day: mealTypes ?? ["breakfast", "lunch", "dinner"],
     household_type: householdType,
     total_members: totalMembers,
     household_id: householdId,
     scope,
     member_profile: memberProfile,
-  });
+  };
 
-  if (graphCandidates && graphCandidates.candidates.length > 0) {
-    // Validate that candidate IDs are real UUIDs before using them
-    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    const hasValidIds = graphCandidates.candidates.every(
-      (c: any) => c.recipe_id && UUID_RE.test(c.recipe_id)
+  // If mealTypes is provided, call RAG per meal type in parallel to get scoped candidates
+  if (mealTypes && mealTypes.length > 0) {
+    const perMealType = await Promise.all(
+      mealTypes.map((mt) =>
+        ragMealCandidates({
+          ...ragBaseParams,
+          limit: Math.ceil(params.limit / mealTypes.length) + 10, // slightly more per type to allow crossover
+          meal_type: mt,
+        })
+      )
     );
 
-    if (hasValidIds) {
-      return graphCandidates.candidates.map((c: any) => ({
-        id: c.recipe_id,
-        title: c.title,
-        mealType: c.meal_type ?? null,
-        cuisine: c.cuisine ?? null,
-        calories: c.calories ?? 0,
-        proteinG: c.protein_g ?? 0,
-        carbsG: c.carbs_g ?? 0,
-        fatG: c.fat_g ?? 0,
-        cookTimeMinutes: c.cook_time_minutes ?? null,
-        allergens: c.allergens ?? [],
-        diets: c.diets ?? [],
-        graphScore: c.score,
-        graphReasons: c.reasons,
-      }));
-    } else {
-      logger.warn("[RAG] Meal candidates have non-UUID IDs, falling back to SQL catalog");
+    // Merge and deduplicate across meal types, keeping first occurrence per recipe ID
+    const seenIds = new Set<string>();
+    const merged: RecipeOption[] = [];
+
+    for (let i = 0; i < mealTypes.length; i++) {
+      const result = perMealType[i];
+      if (!result || result.candidates.length === 0) continue;
+      const hasValidIds = result.candidates.every(
+        (c: any) => c.recipe_id && UUID_RE.test(c.recipe_id)
+      );
+      if (!hasValidIds) {
+        logger.warn(`[RAG] Meal candidates for ${mealTypes[i]} have non-UUID IDs, skipping`);
+        continue;
+      }
+      const mapped = mapRagCandidates(result.candidates, mealTypes[i]);
+      for (const candidate of mapped) {
+        if (!seenIds.has(candidate.id)) {
+          seenIds.add(candidate.id);
+          merged.push(candidate);
+        }
+      }
+    }
+
+    if (merged.length > 0) {
+      // Deduplicate by ID, keeping highest graph score
+      const best = new Map<string, RecipeOption>();
+      for (const c of merged) {
+        const existing = best.get(c.id);
+        if (!existing || (c.graphScore ?? 0) > (existing.graphScore ?? 0)) {
+          best.set(c.id, c);
+        }
+      }
+      return Array.from(best.values()).slice(0, params.limit);
+    }
+
+    // All RAG calls failed or returned no valid IDs — fall through to SQL
+  } else {
+    // No mealTypes provided — single RAG call (legacy behavior for swap, etc.)
+    const graphCandidates = await ragMealCandidates({
+      ...ragBaseParams,
+      limit: params.limit,
+    });
+
+    if (graphCandidates && graphCandidates.candidates.length > 0) {
+      const hasValidIds = graphCandidates.candidates.every(
+        (c: any) => c.recipe_id && UUID_RE.test(c.recipe_id)
+      );
+
+      if (hasValidIds) {
+        return mapRagCandidates(graphCandidates.candidates);
+      } else {
+        logger.warn("[RAG] Meal candidates have non-UUID IDs, falling back to SQL catalog");
+      }
     }
   }
 
@@ -464,6 +535,7 @@ export async function generateMealPlan(
     excludeIds: allExcluded,
     limit: maxRecipes,
     memberDiets: allMemberDiets,
+    mealTypes: input.mealsPerDay,
   }, household.householdType ?? undefined, household.totalMembers ?? undefined,
      household.id, toRagScope(household.householdType), aggregatedProfile);
   let cuisineFallbackApplied = preferredCuisines.length > 0 && cuisineIds.length === 0;
@@ -475,6 +547,7 @@ export async function generateMealPlan(
       excludeIds: allExcluded,
       limit: maxRecipes,
       memberDiets: allMemberDiets,
+      mealTypes: input.mealsPerDay,
     }, household.householdType ?? undefined, household.totalMembers ?? undefined,
        household.id, toRagScope(household.householdType), aggregatedProfile);
     cuisineFallbackApplied = recipeCatalog.length > 0;
@@ -544,6 +617,24 @@ export async function generateMealPlan(
       (err as any).status = 422;
       throw err;
     }
+  }
+
+  // ── Deduplication: ensure each recipe appears at most once across the entire plan ──
+  // Keep earliest occurrence (earlier date → earlier meal slot: breakfast < lunch < dinner < snack)
+  const seenRecipeIds = new Set<string>();
+  const mealTypeOrder = MEAL_TYPE_ORDER;
+  validatedMeals = validatedMeals.sort((a, b) => {
+    if (a.date !== b.date) return a.date.localeCompare(b.date);
+    return (mealTypeOrder[a.mealType] ?? 99) - (mealTypeOrder[b.mealType] ?? 99);
+  });
+  const beforeDedup = validatedMeals.length;
+  validatedMeals = validatedMeals.filter((m) => {
+    if (seenRecipeIds.has(m.recipeId)) return false;
+    seenRecipeIds.add(m.recipeId);
+    return true;
+  });
+  if (beforeDedup !== validatedMeals.length) {
+    logger.info("[MealPlan] Deduplication removed", beforeDedup - validatedMeals.length, "duplicate recipe assignments");
   }
 
   const generationTimeMs = Date.now() - startTime;
@@ -893,7 +984,14 @@ export async function swapMeal(
     limit: 30,
   });
 
-  if (alternatives.length === 0) {
+  // Also exclude any recipes already in the plan that aren't the one being swapped out
+  const planRecipeIds = new Set(currentPlanRecipeIds);
+  const filteredAlternatives = alternatives.filter(
+    (a) => !planRecipeIds.has(a.id) || a.id === item.recipeId
+  );
+  const swappableAlternatives = filteredAlternatives.length > 0 ? filteredAlternatives : alternatives;
+
+  if (swappableAlternatives.length === 0 && alternatives.length === 0) {
     const err = new Error("No alternative recipes available");
     (err as any).status = 422;
     throw err;
@@ -918,11 +1016,11 @@ export async function swapMeal(
       mealDate: item.mealDate,
       mealType: item.mealType || "dinner",
       members,
-      alternatives,
+      alternatives: swappableAlternatives,
       swapReason: reason,
     });
   } catch (error: any) {
-    swapResult = buildRuleBasedSwapFallback(alternatives, item.recipeId, String(error?.message || "LLM unavailable"));
+    swapResult = buildRuleBasedSwapFallback(swappableAlternatives, item.recipeId, String(error?.message || "LLM unavailable"));
   }
 
   const newNutrition = await getRecipeNutrition(swapResult.recipeId);
