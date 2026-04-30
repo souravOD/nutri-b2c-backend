@@ -1,5 +1,7 @@
 import { Router } from "express";
 import { executeRaw } from "../config/database.js";
+import { authMiddleware } from "../middleware/auth.js";
+import { resolveCustomAllergen } from "../services/allergenResolver.js";
 
 const router = Router();
 
@@ -23,6 +25,48 @@ router.get("/allergens", async (req, res, next) => {
       `
     );
     res.json(rows);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @openapi
+ * /taxonomy/allergens/resolve:
+ *   post:
+ *     tags: [Taxonomy]
+ *     summary: Resolve a custom allergen name via synonym lookup + LLM
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               name: { type: string }
+ *             required: [name]
+ *     responses:
+ *       200:
+ *         description: Resolution result
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 matched: { type: boolean }
+ *                 allergenId: { type: string }
+ *                 allergenName: { type: string }
+ *                 reasoning: { type: string }
+ */
+router.post("/allergens/resolve", authMiddleware, async (req, res, next) => {
+  try {
+    const { name } = req.body;
+    if (!name || typeof name !== "string") {
+      return res.status(400).json({ error: "name is required and must be a string" });
+    }
+    const result = await resolveCustomAllergen(name.trim());
+    res.json(result);
   } catch (error) {
     next(error);
   }

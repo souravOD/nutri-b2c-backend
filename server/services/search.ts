@@ -63,7 +63,7 @@ export async function searchRecipes(params: SearchParams): Promise<SearchResult[
 
   try {
     const dietIds = await resolveDietIds(diets);
-    const allergenIds = await resolveAllergenIds(allergensExclude);
+    const { resolved: allergenIds } = await resolveAllergenIds(allergensExclude);
     const conditionIds = await resolveConditionIds(majorConditions);
     const cuisineIds = await resolveCuisineIds(cuisines);
 

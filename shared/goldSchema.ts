@@ -136,6 +136,19 @@ export const allergens = gold.table("allergens", {
   commonNames: text("common_names").array(),
   category: varchar("category", { length: 100 }),
   isTop9: boolean("is_top_9").default(false),
+  silverId: uuid("silver_id"),
+  severityTypical: varchar("severity_typical", { length: 20 }),
+  description: text("description"),
+  crossReactiveWith: uuid("cross_reactive_with").array(),
+  regulatoryRegion: varchar("regulatory_region", { length: 10 }).default("GLOBAL"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const allergenSynonyms = gold.table("allergen_synonyms", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  synonym: varchar("synonym", { length: 255 }).notNull(),
+  canonicalAllergenId: uuid("canonical_allergen_id").notNull(),
+  language: varchar("language", { length: 10 }).default("en"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 

@@ -208,8 +208,8 @@ router.patch("/profile", authMiddleware, rateLimitMiddleware, async (req, res, n
       await replaceCustomerDiets(id, dietIds);
     }
     if (body.allergens) {
-      const allergenIds = await resolveAllergenIds(body.allergens);
-      await replaceCustomerAllergens(id, allergenIds);
+      const { resolved } = await resolveAllergenIds(body.allergens);
+      await replaceCustomerAllergens(id, resolved);
     }
 
     // Write-back to Appwrite to keep both stores in sync
@@ -414,8 +414,45 @@ router.patch("/health", authMiddleware, rateLimitMiddleware, async (req, res, ne
       await replaceCustomerConditions(id, conditionIds);
     }
     if (body.allergens) {
-      const allergenIds = await resolveAllergenIds(body.allergens);
-      await replaceCustomerAllergens(id, allergenIds);
+      const { resolved, unresolved } = await resolveAllergenIds(body.allergens);
+      const allResolvedIds = [...resolved];
+
+      // Process unresolved allergens through 3-tier resolution
+      if (unresolved.length > 0) {
+        const { resolveCustomAllergen } = await import("../services/allergenResolver.js");
+        const { allergenBackfill } = await import("../services/allergenClient.js");
+
+        for (const name of unresolved) {
+          const resolution = await resolveCustomAllergen(name);
+
+          if (resolution.matched && resolution.allergenId) {
+            // Mapped to existing allergen (synonym or LLM)
+            allResolvedIds.push(resolution.allergenId);
+          } else {
+            // Truly novel: create gold.allergens row (silver_id = NULL)
+            try {
+              const [newRow] = await executeRaw(
+                `INSERT INTO gold.allergens (code, name, common_names, is_top_9, regulatory_region)
+                 VALUES ($1, $2, ARRAY[$2]::text[], false, 'GLOBAL')
+                 ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name
+                 RETURNING id`,
+                [name.toLowerCase().replace(/\s+/g, "_"), name]
+              );
+              const goldAllergenId = (newRow as any).id;
+              allResolvedIds.push(goldAllergenId);
+
+              // Fire-and-forget: pipeline backfills silver + remaining gold tables
+              void allergenBackfill(goldAllergenId, name, id).catch((err) =>
+                logger.error("[user/health] Allergen pipeline fire-and-forget failed:", err)
+              );
+            } catch (insertErr) {
+              logger.error(`[user/health] Failed to insert novel allergen "${name}":`, insertErr);
+            }
+          }
+        }
+      }
+
+      await replaceCustomerAllergens(id, allResolvedIds);
     }
     if (body.diets) {
       const dietIds = await resolveDietIds(body.diets);

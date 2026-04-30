@@ -37,19 +37,32 @@ export async function resolveDietIds(input: string[]): Promise<string[]> {
   return rows.map((r: any) => r.id);
 }
 
-export async function resolveAllergenIds(input: string[]): Promise<string[]> {
+export async function resolveAllergenIds(input: string[]): Promise<{
+  resolved: string[];
+  unresolved: string[];
+}> {
   const keys = normalizeKeys(input);
-  if (!keys.length) return [];
+  if (!keys.length) return { resolved: [], unresolved: [] };
   const rows = await executeRaw(
     `
-    select id
+    select id, lower(name) as name, lower(code) as code
     from gold.allergens
     where lower(code) = any($1::text[])
        or lower(name) = any($1::text[])
     `,
     [keys]
   );
-  return rows.map((r: any) => r.id);
+  const resolvedIds = rows.map((r: any) => r.id);
+  const matchedNames = new Set(rows.flatMap((r: any) => [r.name, r.code]));
+  const unresolved = input.filter(name => {
+    const lower = name.toLowerCase().trim();
+    return !matchedNames.has(lower) &&
+           !matchedNames.has(lower.replace(/\s+/g, "-")) &&
+           !matchedNames.has(lower.replace(/\s+/g, "_")) &&
+           !matchedNames.has(lower.replace(/-/g, " ")) &&
+           !matchedNames.has(lower.replace(/_/g, " "));
+  });
+  return { resolved: resolvedIds, unresolved };
 }
 
 export async function resolveConditionIds(input: string[]): Promise<string[]> {
